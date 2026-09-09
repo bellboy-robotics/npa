@@ -101,6 +101,40 @@ def test_postlaunch_failure_preserves_recovery_blocker() -> None:
     ]
 
 
+def test_execution_preflight_failure_does_not_leave_recovery_blocker() -> None:
+    operation = _RecordingOperation()
+    error = SkyPilotSubmitError("GPU preflight rejected", launch_attempted=False)
+    workflow_cli._record_workflow_submit_failure(operation, error)
+    assert operation.rollback == {
+        "attempted": False, "completed": True, "removed": [], "preserved": [], "outcomes": [],
+    }
+    assert operation.transitions[0][0] == "rolled-back"
+    assert operation.transitions[0][1]["details"]["launch_attempted"] is False
+
+
+@pytest.mark.parametrize("failure", ["unknown", "untyped", "issued", "unknown_transaction"])
+def test_unknown_or_issued_launch_cannot_be_rolled_back_as_noop(failure: str) -> None:
+    if failure == "untyped":
+        error = RuntimeError("execution preflight gpu: unknown")
+        error.launch_attempted = False
+    elif failure == "unknown_transaction":
+        error = SkyPilotSubmitError(
+            "transaction evidence unavailable", launch_attempted=False,
+            transaction=SimpleNamespace(launch_sequence=None),
+        )
+    elif failure == "issued":
+        error = SkyPilotSubmitError(
+            "launch evidence wins", launch_attempted=False,
+            transaction=SimpleNamespace(launch_sequence=1),
+        )
+    else:
+        error = SkyPilotSubmitError("unknown failure")
+    operation = _RecordingOperation()
+    workflow_cli._record_workflow_submit_failure(operation, error)
+    assert operation.rollback is None
+    assert operation.transitions[0][0] == "recovery-required"
+
+
 @pytest.fixture()
 def spec_path(tmp_path: Path) -> Path:
     path = tmp_path / "spec.yaml"

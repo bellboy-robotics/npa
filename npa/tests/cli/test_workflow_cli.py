@@ -2360,3 +2360,43 @@ def test_workflow_teardown_errors_when_no_vms_registered(mocker) -> None:
 
     assert result.exit_code == 1
     assert "No distill VMs found" in result.output
+
+
+@pytest.mark.parametrize("stage_count,expected_task,runtime", [
+    (1, "0", {}),
+    (2, "generate", {}),
+    (1, "7", {"stages": [{"stage": "generate", "managed_job_id": "42", "sky_task_id": "7"}]}),
+    (1, "generate", {"waves": [{"states": ["generate"], "job_id": "42"}]}),
+    (1, "3", {"waves": [{"states": ["generate"], "job_id": "42", "tasks": [{"task_id": 3}]}]}),
+])
+def test_workflow_logs_maps_single_stage_root_job_to_task_zero(monkeypatch, stage_count, expected_task, runtime):
+    fake_s3 = FakeWorkflowS3()
+    _patch_workflow_s3(monkeypatch, fake_s3)
+    manifest = {
+        "schema_version": "npa.workflow.run.v1", "workflow": "unit-video",
+        "run_id": "unit-video-run", "api_version": "npa.workflow/v0.0.1",
+        "run_prefix_uri": "s3://bucket/unit-video-run", "status": "RUNNING",
+        "sky_job_id": "42", "steps": [
+            {"state": state, "status": "RUNNING", "resources_profile": {}}
+            for state in ["generate", "review"][:stage_count]
+        ],
+    }
+    key = "unit-video-run/npa-workflow/manifest.json"
+    fake_s3.put_object(Bucket="bucket", Key=key, Body=json.dumps(manifest).encode())
+    if runtime:
+        runtime = {"run_id": "unit-video-run", "waves": [], **runtime}
+        fake_s3.put_object(Bucket="bucket", Key="unit-video-run/npa-workflow/runtime.json",
+                           Body=json.dumps(runtime).encode())
+    captured = []
+
+    def tail(**kwargs):
+        captured.append(kwargs)
+        return subprocess.CompletedProcess(["sky", "jobs", "logs"], 0, "inference progress", "")
+
+    monkeypatch.setattr("npa.orchestration.skypilot.workflow_state.tail_live_job_logs", tail)
+    monkeypatch.setattr("npa.cli.workbench.workflow._resolve_sky_bin", lambda value: "synthetic-sky")
+    result = runner.invoke(app, ["workbench", "workflow", "logs", f"s3://bucket/{key}", "--stage", "generate"])
+    assert result.exit_code == 0, result.output
+    assert "inference progress" in result.output
+    assert captured[0]["job_id"] == "42"
+    assert captured[0]["stage"] == expected_task
