@@ -3507,7 +3507,14 @@ def _record_workflow_submit_failure(operation, exc: BaseException) -> None:  # n
 
     transaction = getattr(exc, "transaction", None)
     launch_sequence = getattr(transaction, "launch_sequence", None)
-    if launch_sequence == 0:
+    from npa.orchestration.skypilot.workflow import SkyPilotSubmitError
+
+    preflight_failed = (
+        transaction is None
+        and isinstance(exc, SkyPilotSubmitError)
+        and exc.launch_attempted is False
+    )
+    if launch_sequence == 0 or preflight_failed:
         operation.record_rollback(
             attempted=False,
             completed=True,
@@ -5914,11 +5921,14 @@ def logs_cmd(
                         typer.echo(f"retry: {live_verification['retry_command']}")
                     raise typer.Exit(code=2)
                 sky_task_id = selected_attempt.get("sky_task_id")
-                live_stage = (
-                    str(sky_task_id)
-                    if sky_task_id is not None and str(sky_task_id) != ""
-                    else selected_stage
-                )
+                if sky_task_id is not None and str(sky_task_id) != "":
+                    live_stage = str(sky_task_id)
+                elif len(steps) == 1 and not resolution.runtime_state.get("waves"):
+                    # SkyPilot renames a single task to the job name. Ordinal 0
+                    # stays valid; runtime waves require their own attribution.
+                    live_stage = "0"
+                else:
+                    live_stage = selected_stage
                 live = tail_live_job_logs(
                     sky_bin=_resolve_sky_bin(sky_bin),
                     job_id=job_id,

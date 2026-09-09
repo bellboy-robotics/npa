@@ -2794,3 +2794,25 @@ def test_submit_transaction_recovers_controller_creation_refusal(
     assert result.launch_transaction["launch_sequence"] == 2
     assert result.launch_transaction["recovery_decision"] == "submitted_and_reconciled"
     assert result.launch_transaction["controller"]["state"] == "absent"
+
+
+@pytest.mark.parametrize("failure_kind", ["resource", "execution"])
+def test_preflight_failure_preserves_explicit_no_launch_evidence(monkeypatch, tmp_path, failure_kind):
+    from unittest.mock import Mock
+    from npa.execution_preflight import ExecutionPreflightError
+
+    if failure_kind == "execution":
+        failure = ExecutionPreflightError("gpu", "capacity unavailable")
+    else:
+        failure = ValueError("bad resource shape")
+    yaml_path = tmp_path / "workflow.yaml"
+    yaml_path.write_text("name: demo\nresources:\n  cloud: kubernetes\n")
+    launch = Mock()
+    monkeypatch.setattr(workflow_module, "run_launch_transaction", launch)
+    monkeypatch.setattr(workflow_module, "_execution_preflight", Mock(side_effect=failure))
+    with pytest.raises(SkyPilotSubmitError) as error:
+        submit_workflow(yaml_path, "preflight-run", sky_bin=_fake_sky(tmp_path),
+                        isolated_config_dir=tmp_path / "sky-state")
+    assert error.value.launch_attempted is False
+    assert error.value.transaction is None
+    launch.assert_not_called()
