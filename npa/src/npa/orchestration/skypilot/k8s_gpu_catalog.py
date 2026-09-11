@@ -1385,22 +1385,17 @@ def resolve_kubernetes_accelerator(
             "with the exact name you want."
         )
     resolved_name = matches[0]
-    allowed = catalog.quantities_by_accelerator[resolved_name]
-    if request.quantity not in allowed:
-        max_per_node = catalog.max_per_node(resolved_name)
-        if request.quantity > max_per_node:
-            raise PermanentlyUnsatisfiableAcceleratorError(
-                f"{resolved_name}:{request.quantity} cannot be scheduled: this cluster's "
-                f"nodes offer at most {max_per_node} of that GPU each, and SkyPilot places "
-                "all GPUs of one task on a single node. Adding nodes does not help. "
-                f"Suggested action: export NPA_WORKFLOW_GPU_ACCELERATOR={resolved_name}:{max_per_node} "
-                "and let the workflow fan out across steps instead of across GPUs."
-            )
-        offered = ", ".join(str(value) for value in sorted(allowed))
+    # SkyPilot summarizes Kubernetes offerings as powers of two. Those are
+    # catalog display sizes, not a restriction on integer GPU pod requests.
+    # Exact free GPU/CPU/memory/affinity fit is checked by gang preflight.
+    max_per_node = catalog.max_per_node(resolved_name)
+    if request.quantity > max_per_node:
         raise PermanentlyUnsatisfiableAcceleratorError(
-            f"{resolved_name}:{request.quantity} is not a requestable quantity on this "
-            f"cluster (it offers {offered} per node). Suggested action: export "
-            f"NPA_WORKFLOW_GPU_ACCELERATOR={resolved_name}:<one of {offered}>."
+            f"{resolved_name}:{request.quantity} cannot be scheduled: this cluster's "
+            f"nodes offer at most {max_per_node} of that GPU each, and SkyPilot places "
+            "all GPUs of one task on a single node. Adding nodes does not help. "
+            f"Suggested action: export NPA_WORKFLOW_GPU_ACCELERATOR={resolved_name}:{max_per_node} "
+            "and let the workflow fan out across steps instead of across GPUs."
         )
     resolved = f"{resolved_name}:{request.quantity}"
     return AcceleratorResolution(

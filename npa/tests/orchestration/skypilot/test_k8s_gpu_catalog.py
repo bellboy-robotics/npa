@@ -146,13 +146,11 @@ def test_two_gpus_per_task_is_rejected_on_single_gpu_nodes() -> None:
     )
 
 
-def test_a_non_offered_quantity_lists_what_is_offered() -> None:
+@pytest.mark.parametrize("count", range(1, 9))
+def test_integer_gpu_requests_fit_within_catalog_node_capacity(count) -> None:
     catalog = parse_kubernetes_gpu_catalog(LIVE_OUTPUT, context="npa-rtxpro-mk8s")
-
-    with pytest.raises(UnsatisfiableAcceleratorError) as excinfo:
-        resolve_kubernetes_accelerator("RTXPRO6000:3", catalog=catalog)
-
-    assert "it offers 1, 2, 4, 8 per node" in str(excinfo.value)
+    resolution = resolve_kubernetes_accelerator(f"RTXPRO6000:{count}", catalog=catalog)
+    assert resolution.resolved == f"RTXPRO-6000-BLACKWELL-SERVER-EDITION:{count}"
 
 
 def test_an_unknown_accelerator_lists_the_available_ones() -> None:
