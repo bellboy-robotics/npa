@@ -2,7 +2,21 @@
 
 import pytest
 
-from npa.orchestration.skypilot.resource_quantities import kubernetes_gpu_quantities
+from npa.orchestration.skypilot.resource_quantities import (
+    kubernetes_ephemeral_storage_quantity, kubernetes_gpu_quantities,
+)
+
+
+@pytest.mark.parametrize("raw,expected", [(None, 0), (500, 500 * 10**9),
+    ("100Gi", 100 * 10**9), ("1024Mi", 10**9), ("0.5", 500_000_000)])
+def test_ephemeral_storage_matches_pod_template(raw, expected):
+    assert kubernetes_ephemeral_storage_quantity({"ephemeral_storage": raw}) == str(expected)
+
+
+@pytest.mark.parametrize("raw", [True, 0, -1, "unlimited", float("inf"), "1e999"])
+def test_invalid_ephemeral_storage_fails_closed(raw):
+    with pytest.raises(ValueError):
+        kubernetes_ephemeral_storage_quantity({"ephemeral_storage": raw})
 
 
 @pytest.mark.parametrize("resources,accelerator,expected", [

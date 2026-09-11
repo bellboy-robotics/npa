@@ -129,6 +129,28 @@ def _fail(msg: str, code: int = 1) -> None:
     raise typer.Exit(code)
 
 
+def _submit_failure_code(error: BaseException) -> int:
+    from npa.orchestration.skypilot.k8s_gpu_catalog import (
+        TemporarilyUnavailableAcceleratorError,
+    )
+    from npa.orchestration.skypilot.workflow import SkyPilotSubmitError
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        # An ambiguous provider response must never become an automatic retry.
+        if isinstance(cause, SkyPilotSubmitError):
+            if cause.launch_attempted is not False:
+                return 1
+            if cause.transaction is not None and cause.transaction.launch_sequence != 0:
+                return 1
+        if isinstance(cause, TemporarilyUnavailableAcceleratorError):
+            return 75
+        cause = cause.__cause__
+    return 1
+
+
 def _workflow_access_requirements(spec) -> tuple:  # noqa: ANN001
     from npa.workbench.access_approval import requirements_for_tool_refs
 
@@ -1418,7 +1440,7 @@ def submit_cmd(
                     )) if infra_context and not deploy_if_absent else None,
                 )
             except (RuntimeError, ValueError) as exc:
-                _fail(str(exc))
+                _fail(str(exc), code=_submit_failure_code(exc))
                 return
 
         # An existing target can prove that PAIDF has nowhere schedulable to run
@@ -1829,7 +1851,8 @@ def submit_cmd(
                     isolated_config_dir=isolated_config_dir,
                 )
             except Exception as exc:
-                _fail(f"multi-node GPU capacity preflight failed: {exc}")
+                _fail(f"multi-node GPU capacity preflight failed: {exc}",
+                      code=_submit_failure_code(exc))
                 return
 
         if runtime and not plan_only:
@@ -2406,8 +2429,8 @@ def submit_cmd(
                     sort_keys=True,
                 )
             )
-            raise typer.Exit(1) from exc
-        _fail(str(exc))
+            raise typer.Exit(_submit_failure_code(exc)) from exc
+        _fail(str(exc), code=_submit_failure_code(exc))
         return
     finally:
         if submitted_yaml_context is not None:
@@ -3363,7 +3386,9 @@ def _preflight_submit_gang_capacity(
         discover_kubernetes_gpu_inventory,
         preflight_kubernetes_gpu_gang,
     )
-    from npa.orchestration.skypilot.resource_quantities import kubernetes_gpu_quantities
+    from npa.orchestration.skypilot.resource_quantities import (
+        kubernetes_ephemeral_storage_quantity, kubernetes_gpu_quantities,
+    )
 
     checks: list[dict[str, object]] = []
     resolved_allowed_nodes = allowed_nodes
@@ -3411,6 +3436,7 @@ def _preflight_submit_gang_capacity(
             node_count=nodes,
             cpus=cpus,
             memory=memory,
+            ephemeral_storage=kubernetes_ephemeral_storage_quantity(effective),
             allowed_nodes=resolved_allowed_nodes,
             pod_spec=pod_spec,
         )

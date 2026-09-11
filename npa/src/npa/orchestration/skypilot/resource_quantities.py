@@ -62,3 +62,19 @@ def kubernetes_gpu_quantities(
     except (DecimalException, OverflowError) as exc:
         raise ValueError("SkyPilot GPU CPU/memory quantity cannot be represented") from exc
     return f"{cpu_millis}m", str(memory_bytes)
+
+
+def kubernetes_ephemeral_storage_quantity(resources: Mapping[str, object]) -> str:
+    """Conservatively translate SkyPilot ephemeral storage to Kubernetes bytes.
+
+    Like memory, SkyPilot normalizes suffixes to GB and renders decimal G.
+    An omitted request reserves no ephemeral storage in the pod template.
+    """
+    raw = resources.get("ephemeral_storage")
+    if raw is None:
+        return "0"
+    try:
+        value = _quantity(raw, memory=True)
+        return str(int((value * 10**9).to_integral_value(rounding=ROUND_CEILING)))
+    except (DecimalException, OverflowError) as exc:
+        raise ValueError("SkyPilot ephemeral storage quantity cannot be represented") from exc
