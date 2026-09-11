@@ -21,6 +21,8 @@ def inventory(*free):
         allocatable_cpu_millis=128000, free_cpu_millis=128000,
         allocatable_memory_bytes=1024**4, free_memory_bytes=1024**4,
         allocatable_pods=110, free_pod_slots=100,
+        allocatable_ephemeral_storage_bytes=950 * 10**9,
+        free_ephemeral_storage_bytes=950 * 10**9,
     ) for i, count in enumerate(free))
     return KubernetesGpuInventory(
         context="test-context", ready_nodes=len(nodes), eligible_gpu_nodes=len(nodes),
@@ -78,3 +80,18 @@ def test_inventory_failure_never_becomes_capacity_wait():
 def test_two_jobs_can_share_disjoint_capacity_on_one_node():
     result = preflight_kubernetes_gpu_gang(inventory(2), accelerator="H100:2", node_count=1)
     assert result["selected_nodes"] == ["node-0"]
+
+
+def test_storage_commitments_wait_even_when_gpus_are_free():
+    current = inventory(2)
+    current = replace(current, nodes=(replace(current.nodes[0],
+        committed_ephemeral_storage_bytes=500 * 10**9,
+        free_ephemeral_storage_bytes=450 * 10**9),))
+    with pytest.raises(TemporarilyUnavailableAcceleratorError, match="ephemeral-storage"):
+        preflight_kubernetes_gpu_gang(current, accelerator="H100:2", node_count=1,
+                                      ephemeral_storage="500G")
+    assert preflight_kubernetes_gpu_gang(current, accelerator="H100:2", node_count=1,
+        ephemeral_storage="100G")["ephemeral_storage_bytes_per_node"] == 100 * 10**9
+    with pytest.raises(PermanentlyUnsatisfiableAcceleratorError):
+        preflight_kubernetes_gpu_gang(current, accelerator="H100:2", node_count=1,
+                                      ephemeral_storage="1000G")

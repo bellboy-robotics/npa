@@ -847,6 +847,7 @@ def test_live_inventory_uses_exact_context_and_subtracts_active_pods() -> None:
                         "nvidia.com/gpu": "2",
                         "cpu": "32",
                         "memory": "64Gi",
+                        "ephemeral-storage": "950G",
                         "pods": "110",
                     },
                 },
@@ -865,6 +866,7 @@ def test_live_inventory_uses_exact_context_and_subtracts_active_pods() -> None:
                                     "nvidia.com/gpu": "1",
                                     "cpu": "8",
                                     "memory": "16Gi",
+                                    "ephemeral-storage": "100G",
                                 }
                             }
                         }
@@ -872,12 +874,12 @@ def test_live_inventory_uses_exact_context_and_subtracts_active_pods() -> None:
                     "initContainers": [
                         {
                             "resources": {
-                                "requests": {"cpu": "12", "memory": "32Gi"},
+                                "requests": {"cpu": "12", "memory": "32Gi", "ephemeral-storage": "200G"},
                                 "limits": {"nvidia.com/gpu": "2"},
                             }
                         }
                     ],
-                    "overhead": {"cpu": "1", "memory": "1Gi"},
+                    "overhead": {"cpu": "1", "memory": "1Gi", "ephemeral-storage": "1G"},
                 },
                 "status": {"phase": "Running"},
             },
@@ -931,6 +933,8 @@ def test_live_inventory_uses_exact_context_and_subtracts_active_pods() -> None:
     assert inventory.nodes[0].free_cpu_millis == 19_000
     assert inventory.nodes[0].committed_memory_bytes == 33 * 1024**3
     assert inventory.nodes[0].free_memory_bytes == 31 * 1024**3
+    assert inventory.nodes[0].committed_ephemeral_storage_bytes == 201 * 10**9
+    assert inventory.nodes[0].free_ephemeral_storage_bytes == 749 * 10**9
     assert inventory.nodes[0].committed_pods == 1
     assert inventory.nodes[0].free_pod_slots == 109
     assert inventory.unbound_pending_gpu_pods == 1

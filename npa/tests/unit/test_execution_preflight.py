@@ -436,7 +436,7 @@ def raw_task(**env):
 
 
 @pytest.mark.parametrize("boundary", ["profile", "rendered"])
-@pytest.mark.parametrize("shortfall", ["", "cpu", "memory"])
+@pytest.mark.parametrize("shortfall", ["", "cpu", "memory", "storage"])
 def test_sky_resource_units_preserve_exact_gpu_capacity_checks(
     provider, configured, monkeypatch, boundary, shortfall,
 ):
@@ -456,6 +456,8 @@ def test_sky_resource_units_preserve_exact_gpu_capacity_checks(
                 free_pod_slots=1,
                 allocatable_cpu_millis=8000, allocatable_memory_bytes=32 * 10**9,
                 allocatable_pods=1,
+                allocatable_ephemeral_storage_bytes=100 * 10**9,
+                free_ephemeral_storage_bytes=100 * 10**9 - int(shortfall == "storage"),
             ),
         ),
     )
@@ -463,7 +465,8 @@ def test_sky_resource_units_preserve_exact_gpu_capacity_checks(
         "npa.orchestration.skypilot.k8s_gpu_catalog.discover_kubernetes_gpu_inventory",
         lambda **kwargs: inventory,
     )
-    profile = {"cloud": "kubernetes", "accelerators": "B200:1", "cpus": 8, "memory": 32}
+    profile = {"cloud": "kubernetes", "accelerators": "B200:1", "cpus": 8, "memory": 32,
+               "disk_size": 100}
     document = raw_task()
     document["resources"].update(normalize_resources(profile))
     spec = SimpleNamespace(

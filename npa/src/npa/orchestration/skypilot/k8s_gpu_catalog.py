@@ -216,6 +216,9 @@ class KubernetesGpuNode:
     committed_pods: int = 0
     free_pod_slots: int = 0
     labels: tuple[tuple[str, str], ...] = ()
+    allocatable_ephemeral_storage_bytes: int = 0
+    committed_ephemeral_storage_bytes: int = 0
+    free_ephemeral_storage_bytes: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -238,6 +241,9 @@ class KubernetesGpuNode:
             "committed_pods": self.committed_pods,
             "free_pod_slots": self.free_pod_slots,
             "labels": dict(self.labels),
+            "allocatable_ephemeral_storage_bytes": self.allocatable_ephemeral_storage_bytes,
+            "committed_ephemeral_storage_bytes": self.committed_ephemeral_storage_bytes,
+            "free_ephemeral_storage_bytes": self.free_ephemeral_storage_bytes,
         }
 
 
@@ -363,15 +369,15 @@ def _container_request(container: object, resource: str) -> int:
     return _cpu_millis(raw) if resource == "cpu" else _memory_bytes(raw)
 
 
-def _pod_commitment(pod: object) -> tuple[str, int, int, int, int]:
+def _pod_commitment(pod: object) -> tuple[str, int, int, int, int, int]:
     if not isinstance(pod, dict):
-        return "", 0, 0, 0, 0
+        return "", 0, 0, 0, 0, 0
     spec = pod.get("spec") or {}
     status = pod.get("status") or {}
     if not isinstance(spec, dict) or not isinstance(status, dict):
-        return "", 0, 0, 0, 0
+        return "", 0, 0, 0, 0, 0
     if str(status.get("phase") or "") in {"Succeeded", "Failed"}:
-        return "", 0, 0, 0, 0
+        return "", 0, 0, 0, 0, 0
     node_name = str(spec.get("nodeName") or "").strip()
     containers = spec.get("containers") or []
     init_containers = spec.get("initContainers") or []
@@ -395,12 +401,20 @@ def _pod_commitment(pod: object) -> tuple[str, int, int, int, int]:
     overhead_memory = (
         _memory_bytes(overhead.get("memory", 0)) if isinstance(overhead, dict) else 0
     )
+    regular_storage = sum(_container_request(item, "ephemeral-storage") for item in containers)
+    init_storage = max(
+        (_container_request(item, "ephemeral-storage") for item in init_containers), default=0
+    )
+    overhead_storage = (
+        _memory_bytes(overhead.get("ephemeral-storage", 0)) if isinstance(overhead, dict) else 0
+    )
     return (
         node_name,
         max(regular_gpu, init_gpu),
         max(regular_cpu, init_cpu) + overhead_cpu,
         max(regular_memory, init_memory) + overhead_memory,
         1,
+        max(regular_storage, init_storage) + overhead_storage,
     )
 
 
@@ -477,18 +491,19 @@ def discover_kubernetes_gpu_inventory(
                 "kubectl pod inventory failed; free shared GPU capacity is unknown",
             )
         pod_payload = json.loads(pod_result.stdout or "{}")
-        committed_by_node: dict[str, tuple[int, int, int, int]] = {}
+        committed_by_node: dict[str, tuple[int, int, int, int, int]] = {}
         unbound_pending_gpu_pods = 0
         unbound_pending_gpu_requests = 0
         for pod in pod_payload.get("items", []):
-            node_name, gpu, cpu, memory, pod_slots = _pod_commitment(pod)
+            node_name, gpu, cpu, memory, pod_slots, storage = _pod_commitment(pod)
             if node_name:
-                prior = committed_by_node.get(node_name, (0, 0, 0, 0))
+                prior = committed_by_node.get(node_name, (0, 0, 0, 0, 0))
                 committed_by_node[node_name] = (
                     prior[0] + gpu,
                     prior[1] + cpu,
                     prior[2] + memory,
                     prior[3] + pod_slots,
+                    prior[4] + storage,
                 )
             elif gpu > 0:
                 # An unbound active GPU pod has already made a claim on shared
@@ -542,6 +557,7 @@ def discover_kubernetes_gpu_inventory(
         node_capacity = int((status.get("capacity") or {}).get("nvidia.com/gpu", 0))
         node_cpu = _cpu_millis((status.get("allocatable") or {}).get("cpu", 0))
         node_memory = _memory_bytes((status.get("allocatable") or {}).get("memory", 0))
+        node_storage = _memory_bytes((status.get("allocatable") or {}).get("ephemeral-storage", 0))
         try:
             node_pods = max(0, int((status.get("allocatable") or {}).get("pods", 0)))
         except (TypeError, ValueError):
@@ -574,8 +590,8 @@ def discover_kubernetes_gpu_inventory(
             ):
                 if value:
                     node_products.add(value)
-        committed, committed_cpu, committed_memory, committed_pods = (
-            committed_by_node.get(name, (0, 0, 0, 0))
+        committed, committed_cpu, committed_memory, committed_pods, committed_storage = (
+            committed_by_node.get(name, (0, 0, 0, 0, 0))
         )
         free = max(0, node_allocatable - committed)
         free_cpu = max(0, node_cpu - committed_cpu)
@@ -612,6 +628,9 @@ def discover_kubernetes_gpu_inventory(
                     committed_pods=committed_pods,
                     free_pod_slots=free_pods,
                     labels=tuple(sorted(all_labels.items())),
+                    allocatable_ephemeral_storage_bytes=node_storage,
+                    committed_ephemeral_storage_bytes=committed_storage,
+                    free_ephemeral_storage_bytes=max(0, node_storage - committed_storage),
                 )
             )
         if ready and not blocked and node_allocatable > 0:
@@ -758,11 +777,12 @@ class _GangRequirements:
     nodes: int
     cpu: int
     memory: int
+    storage: int
     allowed: frozenset[str]
     pod_spec: Mapping[str, object]
 
 
-def _gang_requirements(accelerator, node_count, cpus, memory, allowed_nodes, pod_spec):
+def _gang_requirements(accelerator, node_count, cpus, memory, ephemeral_storage, allowed_nodes, pod_spec):
     expected = int(node_count)
     if expected < 1:
         raise ValueError("node_count must be positive")
@@ -776,7 +796,8 @@ def _gang_requirements(accelerator, node_count, cpus, memory, allowed_nodes, pod
         )
     allowed = frozenset(str(name).strip() for name in (allowed_nodes or ()) if str(name).strip())
     return _GangRequirements(parse_accelerator_request(accelerator), expected,
-                             _cpu_millis(cpus), _memory_bytes(memory), allowed, selected)
+                             _cpu_millis(cpus), _memory_bytes(memory),
+                             _memory_bytes(ephemeral_storage), allowed, selected)
 
 
 def _compatible_gang_nodes(inventory: KubernetesGpuInventory, shape: _GangRequirements):
@@ -790,6 +811,7 @@ def _compatible_gang_nodes(inventory: KubernetesGpuInventory, shape: _GangRequir
             and node.allocatable >= shape.accelerator.quantity
             and node.allocatable_cpu_millis >= shape.cpu
             and node.allocatable_memory_bytes >= shape.memory
+            and node.allocatable_ephemeral_storage_bytes >= shape.storage
             and node.allocatable_pods >= 1]
 
 
@@ -804,7 +826,8 @@ def _require_free_gang(inventory, shape, compatible_nodes, candidates):
             f"least {shape.accelerator.quantity} free {shape.accelerator.name} GPU(s), "
             f"but the gang requires {shape.nodes}. Active pod GPU commitments are subtracted; "
             f"each rank also requires {shape.cpu / 1000:g} CPU and "
-            f"{shape.memory} memory bytes. Active pod GPU/CPU/memory requests "
+            f"{shape.memory} memory bytes and {shape.storage} ephemeral-storage bytes. "
+            "Active pod GPU/CPU/memory/ephemeral-storage requests "
             "and allocatable pod slots are checked. SkyPilot allowed_nodes affinity "
             f"is applied ({sorted(shape.allowed) if shape.allowed else 'unrestricted'}); "
             "aggregate capacity on one node cannot satisfy multiple gang ranks."
@@ -820,7 +843,7 @@ def _require_free_gang(inventory, shape, compatible_nodes, candidates):
 
 def preflight_kubernetes_gpu_gang(
     inventory: KubernetesGpuInventory, *, accelerator: str, node_count: int,
-    cpus: object = 0, memory: object = 0,
+    cpus: object = 0, memory: object = 0, ephemeral_storage: object = 0,
     allowed_nodes: tuple[str, ...] | list[str] | None = None,
     pod_spec: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -832,6 +855,7 @@ def preflight_kubernetes_gpu_gang(
         node_count: Number of distinct nodes required.
         cpus: CPU request per node.
         memory: Memory request per node.
+        ephemeral_storage: Ephemeral storage request per node, in Kubernetes units.
         allowed_nodes: Optional SkyPilot node allowlist.
         pod_spec: Optional Kubernetes placement constraints.
     Returns:
@@ -842,17 +866,19 @@ def preflight_kubernetes_gpu_gang(
     """
     if inventory.error:
         raise KubernetesGpuCatalogError(inventory.error)
-    shape = _gang_requirements(accelerator, node_count, cpus, memory, allowed_nodes, pod_spec)
+    shape = _gang_requirements(accelerator, node_count, cpus, memory, ephemeral_storage, allowed_nodes, pod_spec)
     compatible = _compatible_gang_nodes(inventory, shape)
     candidates = [node for node in compatible if node.ready and node.schedulable
                   and node.free >= shape.accelerator.quantity
                   and node.free_cpu_millis >= shape.cpu
-                  and node.free_memory_bytes >= shape.memory and node.free_pod_slots >= 1]
+                  and node.free_memory_bytes >= shape.memory
+                  and node.free_ephemeral_storage_bytes >= shape.storage and node.free_pod_slots >= 1]
     _require_free_gang(inventory, shape, compatible, candidates)
     return {"context": inventory.context, "accelerator": shape.accelerator.spec,
             "node_count": shape.nodes, "compatible_free_nodes": len(candidates),
             "selected_nodes": [node.name for node in candidates[:shape.nodes]],
             "cpus_per_node": shape.cpu / 1000, "memory_bytes_per_node": shape.memory,
+            "ephemeral_storage_bytes_per_node": shape.storage,
             "allowed_nodes": sorted(shape.allowed)}
 
 

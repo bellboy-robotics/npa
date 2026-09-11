@@ -3386,7 +3386,9 @@ def _preflight_submit_gang_capacity(
         discover_kubernetes_gpu_inventory,
         preflight_kubernetes_gpu_gang,
     )
-    from npa.orchestration.skypilot.resource_quantities import kubernetes_gpu_quantities
+    from npa.orchestration.skypilot.resource_quantities import (
+        kubernetes_ephemeral_storage_quantity, kubernetes_gpu_quantities,
+    )
 
     checks: list[dict[str, object]] = []
     resolved_allowed_nodes = allowed_nodes
@@ -3434,6 +3436,7 @@ def _preflight_submit_gang_capacity(
             node_count=nodes,
             cpus=cpus,
             memory=memory,
+            ephemeral_storage=kubernetes_ephemeral_storage_quantity(effective),
             allowed_nodes=resolved_allowed_nodes,
             pod_spec=pod_spec,
         )
