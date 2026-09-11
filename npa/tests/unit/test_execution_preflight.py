@@ -371,6 +371,8 @@ def test_single_node_gpu_preflight_rejects_wrong_product(provider, monkeypatch):
             KubernetesGpuNode(
                 "unit-node", True, True, ("NVIDIA-B200",), 1, 1, 0, 1,
                 free_cpu_millis=4000, free_memory_bytes=16 * 10**9, free_pod_slots=1,
+                allocatable_cpu_millis=4000, allocatable_memory_bytes=16 * 10**9,
+                allocatable_pods=1,
             ),
         ),
     )
@@ -452,6 +454,8 @@ def test_sky_resource_units_preserve_exact_gpu_capacity_checks(
                 free_cpu_millis=8000 - int(shortfall == "cpu"),
                 free_memory_bytes=32 * 10**9 - int(shortfall == "memory"),
                 free_pod_slots=1,
+                allocatable_cpu_millis=8000, allocatable_memory_bytes=32 * 10**9,
+                allocatable_pods=1,
             ),
         ),
     )
