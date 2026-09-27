@@ -51,7 +51,7 @@ def scan_repository(tmp_path: Path) -> tuple[Path, str]:
 
 def _scan_script(workflow: str, baseline: str) -> str:
     path = REPO_ROOT / ".github/workflows" / workflow
-    definition = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+    definition = yaml.safe_load(path.read_text())
     step = next(
         step
         for step in definition["jobs"]["scan"]["steps"]
