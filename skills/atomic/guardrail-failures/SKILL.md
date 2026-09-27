@@ -83,6 +83,7 @@ Treat every failure here as blocking. Do not add an exemption to make one pass.
 | Guardrail | Fix when it fails |
 |---|---|
 | `test_confidentiality_scan` | The scanner, its built-in Nebius patterns, or the gitleaks wiring changed. Keep `.gitleaks.toml` and `npa/src/npa/guardrails/confidentiality.py` in sync. |
+| `test_fork_confidentiality_workflows` | The fork's PR or main-push workflow stopped enforcing public infrastructure rules, configured private denylists, or valid Git baselines. Restore those checks in both workflows and keep the optional customer policy scoped to `bellboy-robotics/npa`; see `docs/testing/guardrails.md`. |
 | `test_ncore_attribution` / `test_ncore_source_attribution` | NCore's exact CPython notice, immutable dual-archive proof, Git path/mode boundary, diff line mapping, or source disposition drifted. Restore the exact provenance-bound contract; never add a general exemption or hide raw findings. |
 | `test_security_source` | Source scanner output, inventory, ignore handling or stable finding identity is incomplete. Restore fail-closed scanning; run the real scanner workload in `docs/security/merge-security-gate.md`. |
 | `test_security_gate` | A regression comparison, snapshot boundary or dependency report check failed. Preserve duplicate detection and reject incomplete reports or source paths outside the snapshot. |
