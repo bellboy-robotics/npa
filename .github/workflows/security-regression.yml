@@ -209,11 +209,21 @@ jobs:
           git rev-parse --verify "${BASE_SHA}^{commit}"
           scan_args=(--repo-root . --tree --diff-range "${BASE_SHA}..HEAD")
 
-          proof_directory="${RUNNER_TEMP}/ncore-source-attribution-proof"
-          install -d -m 0700 "${proof_directory}"
-          npa/.venv/bin/python -m npa.guardrails.confidentiality \
-            "${scan_args[@]}" --pattern-env CUSTOMER_DENYLIST \
-            --ncore-attribution-proof-directory "${proof_directory}"
+          # This fork has no customer-specific policy. Enforce the public
+          # infrastructure rules on additions, as in the local pre-PR gate.
+          if [ "${GITHUB_REPOSITORY}" = "bellboy-robotics/npa" ]; then
+            npa/.venv/bin/python -m npa.guardrails.confidentiality \
+              --repo-root . --diff-range "${BASE_SHA}..HEAD" --built-in-nebius-infra
+          fi
+          if [ -n "${CUSTOMER_DENYLIST:-}" ] || [ "${GITHUB_REPOSITORY}" != "bellboy-robotics/npa" ]; then
+            proof_directory="${RUNNER_TEMP}/ncore-source-attribution-proof"
+            install -d -m 0700 "${proof_directory}"
+            npa/.venv/bin/python -m npa.guardrails.confidentiality \
+              "${scan_args[@]}" --pattern-env CUSTOMER_DENYLIST \
+              --ncore-attribution-proof-directory "${proof_directory}"
+          else
+            echo "Built-in infrastructure scan enforced; no custom customer denylist configured."
+          fi
 
           if [ -n "${INFRA_DENYLIST:-}" ]; then
             npa/.venv/bin/python -m npa.guardrails.confidentiality \

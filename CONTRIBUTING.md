@@ -484,7 +484,7 @@ cancels the complete superseded gate instead of six independent fragments:
 | `.github/workflows/test.yml` | Full PR coverage; exact-tree queue reuse; scheduled compatibility audit | `make test` |
 | `.github/workflows/lint.yml` | `ruff check .`, and `scripts/build_docs.sh --check` for `docs/cli/` drift | `make lint`, `make docs-check` |
 | `pr-precheck`; `.github/workflows/harness-guardrails.yml` on main | `pytest npa/tests/guardrails` | `make test-guardrails` |
-| `.github/workflows/confidentiality-scan.yml` | `npa.guardrails.confidentiality` over the diff and tree | needs the denylist secrets; see `skills/atomic/protect-nebius-infra-details/SKILL.md` |
+| `.github/workflows/confidentiality-scan.yml` | `npa.guardrails.confidentiality` over the diff and tree | Bellboy's fork always scans additions with the built-in infrastructure rules; configured private denylists add tree/diff checks. Other repositories require the customer denylist; see `docs/testing/guardrails.md`. |
 | `.github/workflows/gitleaks.yml` | the custom Nebius-pattern rules in `.gitleaks.toml` | `gitleaks detect` |
 | `.github/workflows/image-security-scan.yml` | Always reports scope; runs Trivy and complete-byte checks for image-affecting candidates and every main/scheduled audit | `npa/tests/docker/` for the contract checks |
 

@@ -76,5 +76,14 @@ jobs:
             npa/.venv/bin/python -m npa.guardrails.confidentiality "${args[@]}" --pattern-env "${pattern_env}" "$@"
           }
 
-          run_scan CUSTOMER_DENYLIST customer true
+          customer_required=true
+          if [ "${GITHUB_REPOSITORY}" = "bellboy-robotics/npa" ]; then
+            # Refuse an absent baseline rather than silently skipping additions.
+            test -n "${scan_range}"
+            git rev-parse --verify "${scan_range%..HEAD}^{commit}"
+            npa/.venv/bin/python -m npa.guardrails.confidentiality \
+              --repo-root . --diff-range "${scan_range}" --built-in-nebius-infra
+            customer_required=false
+          fi
+          run_scan CUSTOMER_DENYLIST customer "${customer_required}"
           run_scan INFRA_DENYLIST operator-private false --ignore-case
