@@ -70,10 +70,9 @@ CONFIGURATION_REASON_CODES = frozenset(
         "CHECKPOINT_INCOMPATIBLE",
     }
 )
-TRANSIENT_REASON_CODES = frozenset(
+CAPACITY_REASON_CODES = frozenset({"CAPACITY_OR_QUOTA", "GANG_CAPACITY_UNAVAILABLE"})
+TRANSIENT_REASON_CODES = CAPACITY_REASON_CODES | frozenset(
     {
-        "CAPACITY_OR_QUOTA",
-        "GANG_CAPACITY_UNAVAILABLE",
         "NODE_NOT_READY",
         "PREEMPTED",
         "PROVIDER_INTERRUPTION",
@@ -196,6 +195,7 @@ class CheckpointValidation:
 class PreflightEvidence:
     checks: Mapping[str, str] = field(default_factory=dict)
     observed_at: str = ""
+    scope: Mapping[str, Any] = field(default_factory=dict)
 
     REQUIRED_RELAUNCH_CHECKS = frozenset(
         {
@@ -209,16 +209,23 @@ class PreflightEvidence:
 
     @property
     def relaunch_ready(self) -> bool:
-        return all(
-            str(self.checks.get(name) or "").lower() in {"pass", "not_required"}
-            for name in self.REQUIRED_RELAUNCH_CHECKS
-        )
+        for name in self.REQUIRED_RELAUNCH_CHECKS:
+            value = str(self.checks.get(name) or "").lower()
+            # Credential evidence is deliberately persisted only as the
+            # redacted marker.  It still proves the access check passed without
+            # putting a token or credential value into the durable receipt.
+            if name == "credentials_access" and value == "<redacted>":
+                continue
+            if value not in {"pass", "not_required"}:
+                return False
+        return True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "checks": dict(sorted(self.checks.items())),
             "observed_at": self.observed_at,
             "relaunch_ready": self.relaunch_ready,
+            "scope": dict(self.scope),
         }
 
 
@@ -318,6 +325,17 @@ def decide_recovery(
             code,
             "Inspect the exact attempt logs and fix the payload; infrastructure retry is disabled.",
         )
+    if (
+        observation.state is BackendState.SUCCEEDED
+        and context.outputs.all_valid
+        and not _immutable_identity_matches(identity, context)
+    ):
+        return RecoveryDecision(
+            RecoveryAction.BLOCK_RELAUNCH,
+            FailureClass.UNKNOWN,
+            "IMMUTABLE_IDENTITY_MISMATCH",
+            "Restore the recorded workflow, source, and image identities or start a new NPA run ID.",
+        )
     if observation.state is BackendState.SUCCEEDED:
         if context.outputs.all_valid:
             return RecoveryDecision(
@@ -363,6 +381,34 @@ def decide_recovery(
             "IMMUTABLE_IDENTITY_MISMATCH",
             "Restore the recorded workflow, source, and image identities or start a new NPA run ID.",
         )
+    if (
+        context.outputs.all_valid
+        and observation.state in {BackendState.QUEUED, BackendState.RUNNING}
+        and not identity.provider_job_id
+    ):
+        return RecoveryDecision(
+            RecoveryAction.BLOCK_RELAUNCH,
+            FailureClass.UNKNOWN,
+            "AMBIGUOUS_ATTEMPT_IDENTITY",
+            "Restore the exact provider job ID before cancelling a live output-complete attempt.",
+        )
+    if (
+        observation.state in {BackendState.QUEUED, BackendState.RUNNING}
+        and code in CAPACITY_REASON_CODES
+    ):
+        return RecoveryDecision(
+            RecoveryAction.ADOPT_EXACT_ATTEMPT,
+            failure_class,
+            code,
+            "Keep the exact provider attempt while its scheduler waits for capacity.",
+        )
+    if context.outputs.all_valid:
+        return RecoveryDecision(
+            RecoveryAction.REUSE_COMPLETED_WAVE,
+            failure_class,
+            "DECLARED_OUTPUTS_VALID",
+            "Every declared S3 output is valid; no provider relaunch is needed.",
+        )
     if context.infrastructure_recoveries >= context.max_infrastructure_recoveries:
         action = (
             RecoveryAction.CANCEL_AND_TERMINALIZE
@@ -375,13 +421,6 @@ def decide_recovery(
             failure_class,
             "INFRASTRUCTURE_RECOVERY_EXHAUSTED",
             "The finite infrastructure recovery policy is exhausted; cancel the exact live attempt when present, then inspect the durable attempt history before explicitly starting or resuming a run.",
-        )
-    if context.outputs.all_valid:
-        return RecoveryDecision(
-            RecoveryAction.REUSE_COMPLETED_WAVE,
-            failure_class,
-            "DECLARED_OUTPUTS_VALID",
-            "Every declared S3 output is valid; no provider relaunch is needed.",
         )
     if not context.outputs.all_absent:
         return RecoveryDecision(
@@ -435,10 +474,14 @@ class SupervisorLedger:
             "schema_version": SUPERVISOR_SCHEMA_VERSION,
             **_sanitized_mapping(payload),
         }
-        body = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        body = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
         digest = hashlib.sha256(body).hexdigest()
         identity = document.get("attempt_identity") or {}
-        logical_id = _safe_component(str(identity.get("logical_attempt_id") or "attempt"))
+        logical_id = _safe_component(
+            str(identity.get("logical_attempt_id") or "attempt")
+        )
         phase = _safe_component(str(document.get("phase") or "observation"))
         key = f"npa-workflow/supervisor/attempts/{logical_id}/{phase}-{digest}.json"
         return self.store.write_immutable_artifact(
@@ -452,7 +495,10 @@ class SupervisorLedger:
                 payload = json.loads(self.store.read_artifact(key))
             except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            if isinstance(payload, dict) and payload.get("schema_version") == SUPERVISOR_SCHEMA_VERSION:
+            if (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == SUPERVISOR_SCHEMA_VERSION
+            ):
                 result.append(payload)
         phase_order = {
             "decision": 0,
@@ -510,6 +556,34 @@ class WorkflowRunSupervisor:
             },
         }
         base["event_uri"] = self.ledger.record(base)
+        if (
+            decision.action is RecoveryAction.REUSE_COMPLETED_WAVE
+            and observation.state in {BackendState.QUEUED, BackendState.RUNNING}
+        ):
+            cancellation = _sanitized_mapping(self.adapter.cancel_exact(identity))
+            result = {
+                **base,
+                "recorded_at": utc_now(),
+                "phase": "cancellation",
+                "cancellation": cancellation,
+            }
+            cancel_status = str(cancellation.get("status") or "").lower()
+            if not bool(cancellation.get("exact")) or cancel_status not in {
+                "cancelled",
+                "canceled",
+                "failed",
+                "succeeded",
+            }:
+                blocked = RecoveryDecision(
+                    RecoveryAction.BLOCK_RELAUNCH,
+                    FailureClass.UNKNOWN,
+                    "CANCELLATION_UNVERIFIED",
+                    "Verify terminal state for the exact provider attempt before reusing completed outputs.",
+                )
+                result["classification"] = blocked.failure_class.value
+                result["recovery"] = blocked.to_dict()
+            result["event_uri"] = self.ledger.record(result)
+            return result
         if decision.action is RecoveryAction.CANCEL_AND_TERMINALIZE:
             cancellation = _sanitized_mapping(self.adapter.cancel_exact(identity))
             result = {
@@ -537,9 +611,7 @@ class WorkflowRunSupervisor:
             return result
         if decision.relaunch_allowed:
             if observation.state in {BackendState.QUEUED, BackendState.RUNNING}:
-                cancellation = _sanitized_mapping(
-                    self.adapter.cancel_exact(identity)
-                )
+                cancellation = _sanitized_mapping(self.adapter.cancel_exact(identity))
                 cancel_status = str(cancellation.get("status") or "").lower()
                 cancel_exact = bool(cancellation.get("exact"))
                 cancellation_event = {
@@ -548,9 +620,7 @@ class WorkflowRunSupervisor:
                     "phase": "cancellation",
                     "cancellation": cancellation,
                 }
-                cancellation_event["event_uri"] = self.ledger.record(
-                    cancellation_event
-                )
+                cancellation_event["event_uri"] = self.ledger.record(cancellation_event)
                 if not cancel_exact or cancel_status not in {
                     "cancelled",
                     "canceled",
@@ -581,6 +651,19 @@ class WorkflowRunSupervisor:
         return base
 
 
+def _primary_blocker(blockers: list[dict[str, Any]]) -> dict[str, Any]:
+    # A capacity wait must not hide a fatal error from another pod in the job.
+    for codes in (
+        CONFIGURATION_REASON_CODES,
+        PAYLOAD_REASON_CODES,
+        TRANSIENT_REASON_CODES,
+    ):
+        for blocker in blockers:
+            if blocker["reason_code"] in codes:
+                return blocker
+    return blockers[0]
+
+
 class SkyPilotSupervisorAdapter:
     runtime = "skypilot"
     # SkyPilot provider creation remains inside the runtime's existing
@@ -594,7 +677,8 @@ class SkyPilotSupervisorAdapter:
         lookup: Callable[..., Any] | None = None,
         blocker_inspector: Callable[..., Any] | None = None,
         canceller: Callable[[AttemptIdentity], Mapping[str, Any]] | None = None,
-        launcher: Callable[[AttemptIdentity, CheckpointValidation], AttemptIdentity] | None = None,
+        launcher: Callable[[AttemptIdentity, CheckpointValidation], AttemptIdentity]
+        | None = None,
         context: str = "",
     ) -> None:
         self._lookup = lookup
@@ -634,7 +718,9 @@ class SkyPilotSupervisorAdapter:
                 exact_identity=False,
             )
         observed_id = str(getattr(evidence, "job_id", "") or "")
-        exact = bool(identity.provider_job_id and observed_id == identity.provider_job_id)
+        exact = bool(
+            identity.provider_job_id and observed_id == identity.provider_job_id
+        )
         observable = bool(getattr(evidence, "workload_observable", True))
         status = str(getattr(evidence, "status", "") or "UNKNOWN").upper()
         state = _skypilot_state(status)
@@ -655,19 +741,7 @@ class SkyPilotSupervisorAdapter:
                     }
                 )
             if blocker_payload:
-                typed_codes = (
-                    CONFIGURATION_REASON_CODES
-                    | TRANSIENT_REASON_CODES
-                    | PAYLOAD_REASON_CODES
-                )
-                selected = next(
-                    (
-                        blocker
-                        for blocker in blocker_payload
-                        if blocker["reason_code"] in typed_codes
-                    ),
-                    blocker_payload[0],
-                )
+                selected = _primary_blocker(blocker_payload)
                 reason = selected["reason_code"]
                 message = selected["message"]
             elif getattr(report, "unready_nodes", None):
@@ -700,7 +774,9 @@ class SkyPilotSupervisorAdapter:
         checkpoint: CheckpointValidation,
     ) -> AttemptIdentity:
         if self._launcher is None:
-            raise RuntimeError("SkyPilot recovery must use the runtime launch transaction")
+            raise RuntimeError(
+                "SkyPilot recovery must use the runtime launch transaction"
+            )
         return self._launcher(identity, checkpoint)
 
 
@@ -723,7 +799,10 @@ class ServerlessSupervisorAdapter:
     runtime = "serverless"
 
     def __init__(
-        self, spec: ServerlessRecoverySpec, *, client: Any | None = None,
+        self,
+        spec: ServerlessRecoverySpec,
+        *,
+        client: Any | None = None,
         launch_preflight: Callable[[], Any] | None = None,
     ) -> None:
         if client is None:
@@ -736,8 +815,11 @@ class ServerlessSupervisorAdapter:
 
     def observe(self, identity: AttemptIdentity) -> BackendObservation:
         from npa.clients.serverless import (
-            AuthError, EndpointNotFoundError, JobIdentityError,
-            ServerlessClientError, TransientServerlessError,
+            AuthError,
+            EndpointNotFoundError,
+            JobIdentityError,
+            ServerlessClientError,
+            TransientServerlessError,
         )
 
         if not identity.provider_job_id:
@@ -756,19 +838,25 @@ class ServerlessSupervisorAdapter:
             )
         except AuthError as exc:
             return BackendObservation(
-                BackendState.UNKNOWN, reason_code="AUTHORIZATION",
-                message=sanitize_reason(exc), exact_identity=False,
+                BackendState.UNKNOWN,
+                reason_code="AUTHORIZATION",
+                message=sanitize_reason(exc),
+                exact_identity=False,
             )
         except TransientServerlessError as exc:
             return BackendObservation(
-                BackendState.UNKNOWN, reason_code="SERVERLESS_TRANSPORT",
-                message=sanitize_reason(exc), exact_identity=False,
+                BackendState.UNKNOWN,
+                reason_code="SERVERLESS_TRANSPORT",
+                message=sanitize_reason(exc),
+                exact_identity=False,
                 evidence={"lookup": "transient_observation_failure"},
             )
         except JobIdentityError as exc:
             return BackendObservation(
-                BackendState.AMBIGUOUS, reason_code="AMBIGUOUS_ATTEMPT_IDENTITY",
-                message=sanitize_reason(exc), exact_identity=False,
+                BackendState.AMBIGUOUS,
+                reason_code="AMBIGUOUS_ATTEMPT_IDENTITY",
+                message=sanitize_reason(exc),
+                exact_identity=False,
             )
         except ServerlessClientError as exc:
             return BackendObservation(
@@ -784,12 +872,15 @@ class ServerlessSupervisorAdapter:
         )
         state = _serverless_state(str(job.status or ""))
         reason = ""
-        detail = (
-            f"{job.scheduling_state} {job.pending_reason} {job.log_tail}"
-        ).lower()
+        detail = (f"{job.scheduling_state} {job.pending_reason} {job.log_tail}").lower()
         if state is BackendState.QUEUED and any(
-            marker in detail for marker in (
-                "capacity", "quota", "insufficient resources", "not enough resources", "no gpu",
+            marker in detail
+            for marker in (
+                "capacity",
+                "quota",
+                "insufficient resources",
+                "not enough resources",
+                "no gpu",
             )
         ):
             reason = "SERVERLESS_CAPACITY"
@@ -826,7 +917,11 @@ class ServerlessSupervisorAdapter:
 
     def cancel_exact(self, identity: AttemptIdentity) -> Mapping[str, Any]:
         job = self.client.cancel_job(identity.provider_job_id, self.spec.project_id)
-        return {"provider_job_id": job.id, "status": job.status, "exact": job.id == identity.provider_job_id}
+        return {
+            "provider_job_id": job.id,
+            "status": job.status,
+            "exact": job.id == identity.provider_job_id,
+        }
 
     def launch_recovery(
         self,
@@ -897,17 +992,23 @@ def validate_declared_outputs(
             missing=tuple(missing),
             error=sanitize_reason(exc),
         )
-    status = "valid" if len(valid) == len(declared) else "absent" if not valid else "partial"
+    status = (
+        "valid" if len(valid) == len(declared) else "absent" if not valid else "partial"
+    )
     return ArtifactValidation(status, declared, tuple(valid), tuple(missing))
 
 
-def _immutable_identity_matches(identity: AttemptIdentity, context: RecoveryContext) -> bool:
+def _immutable_identity_matches(
+    identity: AttemptIdentity, context: RecoveryContext
+) -> bool:
     pairs = (
         (identity.workflow_sha256, context.expected_workflow_sha256),
         (identity.source_sha256, context.expected_source_sha256),
         (identity.image_digest, context.expected_image_digest),
     )
-    return all(recorded and expected and recorded == expected for recorded, expected in pairs)
+    return all(
+        recorded and expected and recorded == expected for recorded, expected in pairs
+    )
 
 
 def _configuration_remediation(code: str) -> str:
@@ -959,7 +1060,10 @@ def _safe_component(value: str) -> str:
 def _sanitized_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     def clean(item: Any, key: str = "") -> Any:
         lowered = key.lower()
-        if any(marker in lowered for marker in ("secret", "password", "token", "credential")):
+        if any(
+            marker in lowered
+            for marker in ("secret", "password", "token", "credential")
+        ):
             return "<redacted>"
         if isinstance(item, Mapping):
             return {str(k): clean(v, str(k)) for k, v in item.items()}

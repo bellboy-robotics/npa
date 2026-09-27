@@ -1,5 +1,7 @@
 # Run lifecycle: identity, gates, and status
 
+[Docs](README.md)
+
 What `npa workbench workflow submit` verifies before it launches, how a run keeps
 its identity across interruptions, and how to read the status it reports back.
 
@@ -23,15 +25,24 @@ Validation and planning do not launch a workload. Image checks can create and
 delete a temporary Kubernetes probe pod when bootstrap evidence is absent:
 
 ```bash
-npa workbench workflow validate-spec    <spec.yaml>
-npa workbench workflow plan-spec        <spec.yaml> --run-id "$RUN_ID"
-npa workbench workflow preflight-images <spec.yaml> --registry "$REGISTRY"
+npa workbench workflow validate-spec "<spec.yaml>"
+npa workbench workflow plan-spec "<spec.yaml>" --run-id "<run-id>" --var bucket="<bucket>"
+npa workbench workflow preflight-images "<spec.yaml>" \
+  --project "<alias>" --infra "k8s/<cluster>" --var bucket="<bucket>"
 ```
 
+Use the same target and overrides throughout; public images need no `--registry`.
+The [workflow quick start](workbench/npa-workflow-guide.md#quick-start) shows the
+complete sequence.
+
 `preflight-images` reports each image as `ok` / `not_found` / `forbidden` and
-prints the exact build command for anything missing. `submit` runs the same
-check by default, so a missing image surfaces on your machine instead of as an
-`ImagePullBackOff` on the cluster.
+prints the exact build command for anything missing. It unions every declared
+decision outcome, and `--infra k8s/<cluster>` lets the pull check verify that
+exact cluster's declared pull-secret authority. `submit` uses the same complete
+image plan by default, so a branch-specific missing image surfaces before the
+run instead of as an `ImagePullBackOff` on the cluster. If complete-path
+planning itself fails, `preflight-images` exits before any registry or
+Kubernetes probe; it never reports that failure as `images: none`.
 
 ### Quota is arithmetic, and it is checked first
 
@@ -105,6 +116,23 @@ Source staging and submission are content-addressed and idempotent for an
 explicit `RUN_ID`, so repeating a submit repairs and reuses derived artifacts
 instead of duplicating work.
 
+The owner-only submission receipt under
+`~/.npa/workflow-submissions/<project>/<run>.json` is part of that safety
+boundary. If it is unreadable, malformed, symlinked, or belongs to a different
+project/run identity, NPA preserves it and refuses pre-launch mutation. Audit
+the path and its exact ownership, back it up, then repair the receipt before
+retrying; do not delete it merely to bypass the check because it may retain the
+only exact managed-job identity. If corruption occurs after provider acceptance,
+submit still prints a `submission_warnings` entry only when the launch proves
+`submitted` or `adopted` plus a nonblank job ID, so that job can be cancelled or
+reconciled. Any weaker result remains a hard receipt error. Receipt warnings and
+optional post-success artifact-handoff diagnostics redact URL query strings,
+secret assignments, bearer tokens, and resolved credential values before JSON
+output or local persistence. Every workflow CLI `Error:` boundary applies the
+same shape-based redaction before rendering, while preserving multiline
+recovery commands; credential-aware submit failures also redact the exact
+resolved values even when a provider quotes an opaque token.
+
 **A stale or ambiguous run is never selected silently.** Resume by naming it:
 
 ```bash
@@ -117,11 +145,33 @@ must use `--resume-run <id>`.
 A run's committed source is immutable: retries repair or reuse derived
 artifacts, but never replace a user-supplied source with a default.
 
+For an attempt whose exact scheduler record is absent, use
+`--retry-absent-in-flight` with the same explicit resume command after repairing
+the reported dependency. Recovery rechecks both the exact job identity and every
+wave-unique output URI, including structured output declarations with schemas.
+A prior storage-read block remains retryable when the ledger retains verified
+launch absence; a new lookup must still prove absence. Existing outputs,
+unreadable storage, missing output declarations, or uncertain scheduler status
+continue to block a new launch. Prior attempts remain in the run history.
+
+Directory-style output evidence scans every S3 list page for a non-empty
+descendant. Zero-byte directory markers do not prove completion or absence,
+and malformed/truncated pagination blocks recovery rather than authorizing
+duplicate work.
+
 ## Reading status
 
 ```bash
 npa workbench workflow status "$RUN_ID" --project "$PROJECT" --watch
 ```
+
+The finite infrastructure-recovery allowance limits relaunches, not reuse.
+When every declared durable output is valid, recovery marks the wave complete
+even at the allowance boundary. If the exact provider attempt is still live,
+its cancellation must reach a verified terminal state before that reuse is
+accepted.
+The workflow completion result is separate from the observed provider status.
+
 
 `status` resolves the exact run from the selected project's receipt, the
 canonical workflow prefix, or the pinned managed-job identity — even while the
@@ -138,6 +188,15 @@ text output identify every source they checked.
 
 Unrelated nested S3 keys are never guessed as runs.
 
+Per-stage status reads use the same cause-aware boundary. A genuinely missing
+optional status object may fall back to manifest evidence; denied, throttled,
+or unreachable storage makes `status` return
+`VERIFICATION_UNAVAILABLE`/exit 2 while retaining the manifest's last-known
+state. `cancel` makes no cancellation call and records only a
+verification-failed receipt for the same uncertainty.
+Client setup and response-body failures also remain unavailable, even when
+their underlying exception resembles a missing file or key.
+
 If a shell cannot resolve the project storage location, point status at the
 prefix explicitly:
 
@@ -145,6 +204,11 @@ prefix explicitly:
 npa workbench workflow status "$RUN_ID" --project "$PROJECT" \
   --workflow-s3-uri "s3://$BUCKET/<workflow>/$RUN_ID/npa-workflow"
 ```
+
+Valid outputs from a provider-succeeded attempt are reused only when the
+recorded workflow, source, and image identities still match the requested run.
+Missing or changed immutable identity evidence blocks reuse and requires the
+recorded identity to be restored or a new run ID to be started.
 
 ## Where the kubeconfig goes
 
@@ -154,8 +218,13 @@ npa workbench workflow status "$RUN_ID" --project "$PROJECT" \
 `kubectl` in your own shell, export it (the command prints this line for you):
 
 ```bash
-export KUBECONFIG=~/.npa/clusters/<context>/kubeconfig
+export KUBECONFIG="$HOME/.npa/clusters/<context>/kubeconfig"
 ```
+
+A reserved recovery successor retains the provider's verified terminal state
+when its outputs complete the workflow. Logical workflow success can coexist
+with a provider CANCELLED or FAILED state; a SUCCEEDED race remains SUCCEEDED.
+Adoption must not overwrite that provider evidence.
 
 ## Related
 
@@ -164,3 +233,11 @@ export KUBECONFIG=~/.npa/clusters/<context>/kubeconfig
 - [Workflow authoring guide](workbench/npa-workflow-guide.md) · [tool catalog](workbench/npa-workflow-tool-catalog.md)
 - [Tear it all down](teardown.md) — cancellation and cleanup ordering
 - [debug-failed-run skill](../skills/atomic/debug-failed-run/SKILL.md) — triage order for a run that failed or hung
+
+### Exact artifact lookup while a manifest is pending
+
+An explicit storage locator remains scoped to that workflow. Artifact lookup
+may remove a trailing control-directory suffix only when the requested run ID
+and path layout, or the manifest's exact run-prefix provenance, identify the
+parent as the run root. Workflow names and pending status alone never authorize
+listing a parent prefix that could contain a sibling workflow's outputs.

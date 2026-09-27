@@ -117,8 +117,14 @@ def check_model_module() -> str:
 
 def check_guardrail() -> str:
     from cosmos_framework.auxiliary.guardrail import common  # noqa: F401
+    from cosmos_framework.auxiliary.guardrail.video_content_safety_filter.video_content_safety_filter import (
+        VideoContentSafetyFilter,
+    )
 
-    return "guardrail package importable (guardrails stay on by default)"
+    return (
+        "guardrail package and generated-media safety model importable "
+        f"({VideoContentSafetyFilter.__name__}; guardrails stay on by default)"
+    )
 
 
 def check_checkpoint_lookup() -> str:
@@ -155,7 +161,9 @@ def check_mode_resolution() -> str:
         for mode in MODES:
             sample = _sample_for(mode, root)
             setup_args = OmniSetupOverrides(
-                checkpoint_path=os.environ.get("NPA_COSMOS3_CHECKPOINT", "Cosmos3-Nano"),
+                checkpoint_path=os.environ.get(
+                    "NPA_COSMOS3_CHECKPOINT", "Cosmos3-Nano"
+                ),
                 output_dir=root / "out",
             ).build_setup()
             samples = setup_args.get_sample_overrides_cls().from_files([sample])

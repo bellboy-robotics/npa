@@ -1,5 +1,7 @@
 # Cosmos3-Nano native Ray Serve
 
+[Workbench docs](README.md)
+
 `npa-cosmos3-ray-serve` is the persistent, batch-capable counterpart to the
 single-run `npa workbench cosmos3 generate` path. It loads Cosmos3-Nano once and
 uses NVIDIA cosmos-framework 1.2.2's native `OmniModelDeployment`, including its
@@ -19,7 +21,7 @@ The container starts `npa workbench cosmos3 ray-serve`. Important settings:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `NPA_COSMOS3_RAY_WORLD_SIZE` | `1` | GPUs used by one persistent model replica |
-| `NPA_COSMOS3_RAY_MAX_BATCH_SIZE` | `4` | Maximum samples coalesced by upstream Ray Serve |
+| `NPA_COSMOS3_RAY_MAX_BATCH_SIZE` | `4` | Maximum samples coalesced by upstream Ray Serve; also sets the model replica's admission capacity so the configured batch can form |
 | `NPA_COSMOS3_RAY_BATCH_WAIT_TIMEOUT_S` | `0.05` | Coalescing window in seconds |
 | `NPA_COSMOS3_RAY_PARALLELISM_PRESET` | `throughput` | Upstream Cosmos parallelism preset |
 | `NPA_COSMOS3_RAY_GUARDRAILS` | `true` | Guardrails remain on unless explicitly disabled |
@@ -49,7 +51,9 @@ exact access probe to pass before starting the client.
 
 The service exposes authenticated `GET /health`, model-backed `GET /ready`,
 `GET /models`, `GET /system-info`, `POST /v1/batches`, and artifact retrieval at
-`GET /v1/artifacts/{path}`.
+`GET /v1/artifacts/{path}`. Readiness reports both `max_batch_size` and
+`model_max_ongoing_requests`; they must match for this single-concurrent-batch
+deployment.
 
 ### Trusted batch callers and conditioning downloads
 
@@ -82,9 +86,9 @@ Run the updated client from an editable installation of this checkout:
 
 ```bash
 npa/.venv/bin/python -m npa workbench cosmos3 ray-batch \
-  --input-path s3://<bucket>/<prefix>/batch.json \
-  --output-path s3://<bucket>/<prefix>/outputs/ \
-  --endpoint http://<service>:8000
+  --input-path "s3://<bucket>/<prefix>/batch.json" \
+  --output-path "s3://<bucket>/<prefix>/outputs/" \
+  --endpoint "http://<service>:8000"
 ```
 
 The submitted samples become concurrent deployment-handle calls; upstream Ray
@@ -141,7 +145,7 @@ with an operator-owned S3 output prefix. Configure the service's
 
 ```bash
 NPA_INTEGRATION_E2E=1 \
-NPA_COSMOS3_RAY_LIVE_OUTPUT_URI=s3://<bucket>/<prefix>/ \
+NPA_COSMOS3_RAY_LIVE_OUTPUT_URI="s3://<bucket>/<prefix>/" \
   npa/.venv/bin/python -m pytest \
   npa/tests/e2e/test_cosmos3_ray_batch_live_e2e.py -q
 ```

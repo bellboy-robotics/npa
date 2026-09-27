@@ -11,6 +11,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+from npa.workbench.cosmos.visual_grounding import (
+    HOSTED_EVAL_SCHEMA,
+    bind_action_frames,
+    insufficient_visual_evidence,
+    valid_visual_binding,
+)
+
 DEFAULT_REASON1_MODEL = "nvidia/Cosmos-Reason1-7B"
 DEFAULT_REASON2_MODEL = "nvidia/Cosmos-Reason2-8B"
 DEFAULT_COSMOS3_MODEL = "nvidia/Cosmos3-Super-Reasoner"
@@ -271,6 +278,7 @@ def merge_reason_evaluations(
                 "critique_text": " | ".join(critique_parts),
                 "error_tags": _normalize_error_tags(tags),
                 "action": left.get("action") or right.get("action") or [],
+                **_merge_episode_evidence(left, right),
                 "simulator_ground_truth": simulator_ground_truth,
                 "scenario_config_digest": next(iter(scenario_digests), ""),
                 "camera_observation": str(
@@ -394,7 +402,9 @@ def run_cosmos_reason_vlm(
         frame_names=[path.name for path in selected_paths],
     )
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    content.extend({"type": "image", "image": str(path.resolve())} for path in selected_paths)
+    content.extend(
+        {"type": "image", "image": str(path.resolve())} for path in selected_paths
+    )
     messages = [{"role": "user", "content": content}]
 
     print(
@@ -507,6 +517,7 @@ def run_token_factory_rollout_vlm(
     threshold: float,
     client: Any | None = None,
     max_frames: int = DEFAULT_HOSTED_EVENT_FRAMES,
+    frame_metadata: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Score one rollout with a supported hosted VLM and retain its identity."""
 
@@ -522,6 +533,18 @@ def run_token_factory_rollout_vlm(
     selected_paths = select_hosted_event_frames(image_paths, max_frames=max_frames)
     if not selected_paths:
         raise CosmosReasonError("hosted rollout evaluation requires at least one frame")
+    frame_names = [path.name for path in selected_paths]
+    try:
+        bindings = bind_action_frames(
+            actions=actions,
+            frame_metadata=frame_metadata,
+            frame_names=frame_names,
+            rollout_id=rollout_id,
+        )
+    except ValueError as exc:
+        raise CosmosReasonError(
+            f"hosted evaluator visual grounding rejected: {exc}"
+        ) from exc
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -529,8 +552,12 @@ def run_token_factory_rollout_vlm(
                 family=family,
                 task_description=task_description,
                 actions=actions,
-                frame_names=[path.name for path in selected_paths],
+                frame_names=frame_names,
                 include_all_actions=True,
+                visual_bindings=bindings,
+                selected_frame_metadata=[
+                    frame for frame in frame_metadata if frame["path"] in frame_names
+                ],
             ),
         }
     ]
@@ -549,6 +576,11 @@ def run_token_factory_rollout_vlm(
             messages=[{"role": "user", "content": content}],
             temperature=0.0,
             max_tokens=DEFAULT_REASON_MAX_NEW_TOKENS,
+            response_format=_hosted_rollout_response_format(
+                actions,
+                frame_names,
+                visual_bindings=bindings,
+            ),
         )
         if response.get("model") != resolved_model:
             raise CosmosReasonError(
@@ -556,20 +588,25 @@ def run_token_factory_rollout_vlm(
             )
         choice = response["choices"][0]
         if choice.get("finish_reason") != "stop":
-            raise CosmosReasonError("hosted evaluator returned an incomplete completion")
+            raise CosmosReasonError(
+                "hosted evaluator returned an incomplete completion"
+            )
         message = choice["message"]
         model_text, _reasoning = split_reasoning(message)
     except (TokenFactoryError, KeyError, IndexError, TypeError) as exc:
         raise CosmosReasonError(f"hosted rollout evaluation failed: {exc}") from exc
     if not model_text:
-        raise CosmosReasonError("hosted evaluator returned no visible structured evaluation")
+        raise CosmosReasonError(
+            "hosted evaluator returned no visible structured evaluation"
+        )
     payload = _parse_hosted_rollout_output(
         model_text,
         actions=actions,
         rollout_id=rollout_id,
         threshold=threshold,
         family=family,
-        frame_names=[path.name for path in selected_paths],
+        frame_names=frame_names,
+        visual_bindings=bindings,
     )
     raw_usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
     transport = getattr(active, "last_request_metrics", {}) or {}
@@ -587,6 +624,9 @@ def run_token_factory_rollout_vlm(
             "frame_count": len(selected_paths),
             "action_count": len(actions),
             "selected_frames": [path.name for path in selected_paths],
+            "selected_frame_metadata": [
+                dict(frame) for frame in frame_metadata if frame["path"] in frame_names
+            ],
             "request": {
                 "request_id": str(response.get("id") or "") or None,
                 "input_tokens": int(raw_usage.get("prompt_tokens") or 0),
@@ -602,6 +642,93 @@ def run_token_factory_rollout_vlm(
     return payload
 
 
+def _hosted_event_schema(step: int, binding: dict[str, Any]) -> dict[str, Any]:
+    """Encode the camera authority of one action before model generation."""
+
+    camera = binding["camera_observation"]
+    event = {
+        "step": {"type": "integer", "enum": [step]},
+        "critique_text": {"type": "string", "minLength": 1},
+        "error_tags": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "enum": list(ERROR_SEVERITY)},
+        },
+        "camera_observation": {
+            "type": "string" if camera is not None else "null",
+            "enum": [camera],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    }
+    if not binding["supported"]:
+        event["critique_text"]["enum"] = [insufficient_visual_evidence(step)]
+        event["confidence"]["enum"] = [0]
+        event["error_tags"].update(maxItems=1, items={"type": "string", "enum": ["ok"]})
+    return {
+        "type": "object",
+        "properties": event,
+        "required": list(event),
+        "additionalProperties": False,
+    }
+
+
+def _hosted_rollout_response_format(
+    actions: list[dict[str, Any]],
+    frame_names: list[str],
+    *,
+    visual_bindings: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Constrain each generated event to its original action and visual evidence."""
+
+    steps = [action.get("step", index) for index, action in enumerate(actions)]
+    if (
+        not steps
+        or any(type(step) is not int for step in steps)
+        or len(set(steps)) != len(steps)
+        or set(visual_bindings) != set(steps)
+    ):
+        raise CosmosReasonError(
+            "hosted response schema requires unique bound action indices"
+        )
+    events = []
+    for step in steps:
+        binding = visual_bindings[step]
+        if (
+            not valid_visual_binding(binding, step=step)
+            or binding["supported"]
+            and binding["camera_observation"] not in frame_names
+        ):
+            raise CosmosReasonError(
+                "hosted response schema requires recorded visual bindings"
+            )
+        events.append(_hosted_event_schema(step, binding))
+    properties = {
+        "success": {"type": "boolean"},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string", "minLength": 1},
+        "per_step": {
+            "type": "array",
+            "minItems": len(actions),
+            "maxItems": len(actions),
+            "prefixItems": events,
+            "items": False,
+        },
+    }
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "rollout_evaluation",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _parse_hosted_rollout_output(
     model_text: str,
     *,
@@ -610,6 +737,7 @@ def _parse_hosted_rollout_output(
     threshold: float,
     family: str,
     frame_names: list[str],
+    visual_bindings: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate complete hosted JSON before applying the shared output shape.
 
@@ -622,8 +750,12 @@ def _parse_hosted_rollout_output(
         return CosmosReasonError(f"hosted evaluator contract rejected: {reason}")
 
     def number_in_unit_interval(value: Any) -> bool:
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value) and 0 <= value <= 1)
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and 0 <= value <= 1
+        )
 
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
@@ -636,7 +768,9 @@ def _parse_hosted_rollout_output(
     try:
         decoded = json.loads(model_text, object_pairs_hook=unique_object)
     except (TypeError, ValueError) as exc:
-        raise invalid("expected one complete JSON object without repaired prefixes") from exc
+        raise invalid(
+            "expected one complete JSON object without repaired prefixes"
+        ) from exc
     if not isinstance(decoded, dict):
         raise invalid("expected one JSON object")
     if not number_in_unit_interval(decoded.get("score")):
@@ -648,27 +782,73 @@ def _parse_hosted_rollout_output(
     if decoded.get("rollout_id", rollout_id) != rollout_id:
         raise invalid("rollout identity does not match the input")
     expected = [action.get("step", index) for index, action in enumerate(actions)]
-    if (not expected or any(type(step) is not int for step in expected)
-            or len(set(expected)) != len(expected)):
+    if (
+        not expected
+        or any(type(step) is not int for step in expected)
+        or len(set(expected)) != len(expected)
+    ):
         raise invalid("input action indices must be nonempty unique integers")
+    if (
+        not isinstance(visual_bindings, dict)
+        or set(visual_bindings) != set(expected)
+        or any(
+            not valid_visual_binding(visual_bindings[step], step=step)
+            for step in expected
+        )
+    ):
+        raise invalid("every action requires a recorded visual grounding binding")
+    action_times = {action["step"]: action.get("sim_step") for action in actions}
+    if any(
+        visual_bindings[step]["action_sim_step"] != action_times[step]
+        for step in expected
+    ):
+        raise invalid("visual grounding time differs from the original action")
+    if any(
+        visual_bindings[action["step"]]["episode_boundary"]
+        != action.get("episode_boundary")
+        for action in actions
+    ):
+        raise invalid("visual grounding episode differs from the original action")
     events = decoded.get("per_step")
     if not isinstance(events, list) or len(events) != len(expected):
         raise invalid("per_step must cover every input action exactly once")
     indices = []
-    allowed_tags = {"collision", "missed_target", "unstable", "late_grasp", "minor_alignment", "ok"}
+    allowed_tags = set(ERROR_SEVERITY)
     for event in events:
         if not isinstance(event, dict) or type(event.get("step")) is not int:
             raise invalid("event step must be an integer")
         indices.append(event["step"])
-        if not isinstance(event.get("critique_text"), str) or not event["critique_text"].strip():
+        if (
+            not isinstance(event.get("critique_text"), str)
+            or not event["critique_text"].strip()
+        ):
             raise invalid("every event requires a model-local critique")
         if not number_in_unit_interval(event.get("confidence")):
             raise invalid("event confidence must be a finite number from 0 to 1")
-        if event.get("camera_observation") not in frame_names:
-            raise invalid("event camera must identify a selected input frame")
+        binding = visual_bindings.get(event["step"])
+        if (
+            not binding
+            or "camera_observation" not in event
+            or event["camera_observation"] != binding["camera_observation"]
+        ):
+            raise invalid("event camera must match its action's recorded visual frame")
+        if binding["supported"]:
+            if event.get("camera_observation") not in frame_names:
+                raise invalid("event camera must identify a selected input frame")
+        elif (
+            event["confidence"] != 0
+            or event.get("error_tags") != ["ok"]
+            or event["critique_text"] != insufficient_visual_evidence(event["step"])
+        ):
+            raise invalid(
+                "unobserved actions require zero-confidence insufficient visual evidence"
+            )
         tags = event.get("error_tags")
-        if (not isinstance(tags, list) or not tags
-                or any(not isinstance(tag, str) or tag not in allowed_tags for tag in tags)):
+        if (
+            not isinstance(tags, list)
+            or not tags
+            or any(not isinstance(tag, str) or tag not in allowed_tags for tag in tags)
+        ):
             raise invalid("event error_tags must use the requested vocabulary")
         if event.get("critique_source", "model_per_step") != "model_per_step":
             raise invalid("event critique must come from the model")
@@ -676,9 +856,37 @@ def _parse_hosted_rollout_output(
         raise invalid("event indices do not exactly match the input actions")
     # All fields the common formatter would otherwise recover or clamp were
     # validated above. Its simulator-ground-truth join remains authoritative.
-    return _parse_cosmos_reason_output(
-        model_text, actions=actions, rollout_id=rollout_id, threshold=threshold, family=family,
+    result = _parse_cosmos_reason_output(
+        model_text,
+        actions=actions,
+        rollout_id=rollout_id,
+        threshold=threshold,
+        family=family,
     )
+    result["schema"] = HOSTED_EVAL_SCHEMA
+    for event in result["per_step"]:
+        event["sim_step"] = action_times[event["step"]]
+        event["visual_grounding"] = dict(visual_bindings[event["step"]])
+    return result
+
+
+def _merge_episode_evidence(
+    left: dict[str, Any], right: dict[str, Any]
+) -> dict[str, Any]:
+    if "episode_boundary" not in left and "episode_boundary" not in right:
+        return {}
+    from npa.workflows.sim2real.episode_boundaries import validate_episode_boundary
+
+    try:
+        first = validate_episode_boundary(left)
+        second = validate_episode_boundary(right)
+    except ValueError as error:
+        raise CosmosReasonError(
+            "Reason lanes lack consistent episode boundaries"
+        ) from error
+    if first != second or left["sim_step"] != right["sim_step"]:
+        raise CosmosReasonError("Reason lanes disagree on episode boundaries")
+    return {"sim_step": left["sim_step"], "episode_boundary": dict(first)}
 
 
 def _reason_model_class(family: str, fallback: Any) -> Any:
@@ -725,6 +933,8 @@ def _cosmos_reason_prompt(
     actions: list[dict[str, Any]],
     frame_names: list[str],
     include_all_actions: bool = False,
+    visual_bindings: dict[int, dict[str, Any]] | None = None,
+    selected_frame_metadata: list[dict[str, Any]] | None = None,
 ) -> str:
     # Simulator ground truth is deliberately excluded: Cosmos labels are
     # calibrated *against* those measurements after inference and must not see
@@ -739,6 +949,11 @@ def _cosmos_reason_prompt(
                 "step": int(action.get("step", index)),
                 "sim_step": int(action.get("sim_step", action.get("step", index))),
                 "action": list(action.get("action") or []),
+                **(
+                    {"episode_boundary": action["episode_boundary"]}
+                    if "episode_boundary" in action
+                    else {}
+                ),
             }
             for index, action in enumerate(prompt_actions)
         ],
@@ -757,25 +972,53 @@ def _cosmos_reason_prompt(
         if family == "minimax_m3"
         else f"You are NVIDIA {label} evaluating a physical robot rollout.\n"
     )
+    grounding = ""
+    if visual_bindings is not None:
+        grounding = (
+            "Visual bindings by action: "
+            + json.dumps(list(visual_bindings.values()), sort_keys=True)
+            + "\n"
+            "Use each action's exact camera_observation from these bindings. Sampled image order is NOT "
+            "action order. Never borrow a past or future frame for another action. A final frame may "
+            "support the overall rollout score without supporting any action. For supported=false, "
+            'return camera_observation=null, confidence=0, error_tags=["ok"], and critique_text exactly '
+            "'Insufficient visual evidence for step N.' with N replaced by that action's step. "
+            "For supported=true, judge only the bound frame and use confidence=0 if it is unclear.\n"
+            "Simulator episode identifiers mark resets, not successful motion. Never infer motion "
+            "or task progress between different simulator episodes. Reset transitions are context "
+            "only and cannot justify a critique of the preceding action.\n"
+        )
     return (
-        identity
-        + f"Task description: {task_description}\n"
+        identity + f"Task description: {task_description}\n"
         f"Frame order: {frame_names}\n"
+        f"Frame episode identities: {_frame_episode_identities(selected_frame_metadata)}\n"
         f"Actions by step: {action_excerpt}\n"
         f"Required per_step indices: {expected_steps}\n"
+        f"{grounding}"
         "Return one JSON object only; never use a top-level array. The object "
         "must contain: success (boolean), "
         "score (number from 0 to 1), summary (natural-language critique), and "
         "per_step (array of objects with step, critique_text, error_tags, "
         "camera_observation, confidence). per_step MUST contain exactly one "
         "compact, event-specific object for every required index; keep each "
-        "critique_text at 12 words or fewer, and set camera_observation to the "
-        "corresponding frame filename rather than another description; never copy or "
+        "critique_text at 12 words or fewer, and follow the explicit visual binding "
+        "when supplied; otherwise use the corresponding frame filename; never copy or "
         "broadcast the rollout summary into step entries. If a step cannot be "
         "judged visually, use a step-specific 'insufficient visual evidence' "
-        "critique with confidence 0. Use only these error tags when applicable: "
+        "critique with confidence 0. error_tags must be a nonempty array using "
+        "only the following vocabulary (use ok when no error is observed): "
         "collision, missed_target, unstable, late_grasp, minor_alignment, ok. "
         "Judge actual visual rollout behavior, not metadata or requested actions."
+    )
+
+
+def _frame_episode_identities(metadata: list[dict[str, Any]] | None) -> str:
+    return json.dumps(
+        [
+            {key: frame[key] for key in ("path", "sim_step", "simulator_episode_id")}
+            for frame in metadata or []
+        ],
+        sort_keys=True,
     )
 
 
@@ -860,6 +1103,20 @@ def _parse_cosmos_reason_output(
                 "critique_text": critique,
                 "error_tags": normalized_tags,
                 "action": expected_actions[step].get("action", []),
+                **(
+                    {"sim_step": expected_actions[step]["sim_step"]}
+                    if "sim_step" in expected_actions[step]
+                    else {}
+                ),
+                **(
+                    {
+                        "episode_boundary": dict(
+                            expected_actions[step]["episode_boundary"]
+                        )
+                    }
+                    if "episode_boundary" in expected_actions[step]
+                    else {}
+                ),
                 # Ground truth is deliberately excluded from the model prompt, then
                 # reattached from the authoritative rollout row for calibration.
                 # Without this post-inference join, temporal credit had no grounded
@@ -869,13 +1126,15 @@ def _parse_cosmos_reason_output(
                 ),
                 "scenario_config_digest": str(
                     expected_actions[step].get("scenario_config_digest")
-                    or (
-                        expected_actions[step].get("simulator_ground_truth") or {}
-                    ).get("scenario_config_digest")
+                    or (expected_actions[step].get("simulator_ground_truth") or {}).get(
+                        "scenario_config_digest"
+                    )
                     or ""
                 ),
-                "camera_observation": str(
-                    raw.get("camera_observation") or f"camera-{step:03d}.ppm"
+                "camera_observation": (
+                    None
+                    if "camera_observation" in raw and raw["camera_observation"] is None
+                    else str(raw.get("camera_observation") or f"camera-{step:03d}.ppm")
                 ),
                 "critique_source": critique_source,
                 "confidence": max(

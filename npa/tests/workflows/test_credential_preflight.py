@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -9,6 +10,7 @@ from npa.workflows.credential_preflight import (
     SUPPORTED_CREDENTIAL_CHECKS,
     CredentialProbes,
     check_hf,
+    check_encord,
     check_nebius,
     check_ngc,
     check_s3,
@@ -28,6 +30,7 @@ class _Creds:
     s3_secret_access_key: str = ""
     s3_endpoint: str = ""
     s3_bucket: str = ""
+    tokens: dict[str, str] | None = None
 
 
 @dataclass
@@ -85,15 +88,18 @@ def test_ngc_nonempty_credential_passes_presence_only_offline(credential: str) -
     assert "not verified" in result.summary
 
 
+@pytest.mark.parametrize(
+    "outcome", ["entitlement-required", "manifest-403", "manifest-404"]
+)
 @pytest.mark.parametrize("credential", ["nvapi-abc123", "registry-credential"])
 def test_ngc_live_probe_proves_token_exchange_without_implying_entitlement(
-    credential: str,
+    credential: str, outcome: str
 ) -> None:
     observed: list[str] = []
 
     def validate(key: str) -> str:
         observed.append(key)
-        return "entitlement-required"
+        return outcome
 
     result = check_ngc(
         _Creds(ngc_api_key=credential), CredentialProbes(ngc_validator=validate)
@@ -130,7 +136,7 @@ def test_s3_present_unverified_without_probe() -> None:
 
 def test_s3_pass_when_reachable() -> None:
     class _Client:
-        def list_checkpoints(self, uri):
+        def probe_list_access(self, uri):
             return []
 
     creds = _Creds(
@@ -145,7 +151,7 @@ def test_s3_pass_when_reachable() -> None:
 
 def test_s3_fail_on_auth_error() -> None:
     class _Client:
-        def list_checkpoints(self, uri):
+        def probe_list_access(self, uri):
             raise RuntimeError("403 Forbidden AccessDenied")
 
     creds = _Creds(
@@ -180,6 +186,17 @@ def test_token_factory_fail_when_verifier_raises() -> None:
     probes = CredentialProbes(token_factory_verifier=_boom)
     result = check_token_factory(_Creds(token_factory_api_key="v1.bad"), probes)
     assert result.status == FAIL
+
+
+def test_encord_presence_and_live_probe() -> None:
+    missing = check_encord(_Creds(tokens={}), CredentialProbes())
+    assert missing.status == WARN
+    present = check_encord(
+        _Creds(tokens={"ENCORD_SSH_KEY_B64": "encoded-key"}),
+        CredentialProbes(encord_verifier=lambda: "storage folders listable"),
+    )
+    assert present.status == PASS
+    assert "authenticated" in present.summary
 
 
 @dataclass
@@ -266,7 +283,7 @@ def test_run_credential_preflight_default_order() -> None:
 
 def test_supported_checks_add_nebius_without_changing_defaults() -> None:
     assert CREDENTIAL_CHECKS == ("hf", "ngc", "s3", "token_factory")
-    assert SUPPORTED_CREDENTIAL_CHECKS == (*CREDENTIAL_CHECKS, "nebius")
+    assert SUPPORTED_CREDENTIAL_CHECKS == (*CREDENTIAL_CHECKS, "encord", "nebius")
 
 
 def test_run_credential_preflight_rejects_unknown_check() -> None:
@@ -274,9 +291,98 @@ def test_run_credential_preflight_rejects_unknown_check() -> None:
         run_credential_preflight(_Creds(), checks=["bogus"])
 
 
+def test_run_credential_preflight_runs_checks_concurrently() -> None:
+    """All 3 probes must be in flight at once, proven deterministically.
+
+    A ``threading.Barrier(3)`` only releases once all 3 parties have called
+    ``wait()``. If the checks ran serially, the first probe would block at
+    the barrier forever (no other party ever arrives) and this test would
+    fail with a deterministic ``BrokenBarrierError`` on timeout rather than
+    a flaky wall-clock measurement.
+    """
+
+    barrier = threading.Barrier(3, timeout=5)
+
+    probes = CredentialProbes(
+        hf_validator=lambda token: (barrier.wait(), _HFResult(ok=True))[1],
+        ngc_validator=lambda key: (barrier.wait(), "reachable")[1],
+        token_factory_verifier=lambda: (barrier.wait(), [])[1],
+    )
+    creds = _Creds(hf_token="hf_x", ngc_api_key="nvapi-x", token_factory_api_key="v1.x")
+
+    results = run_credential_preflight(
+        creds, probes=probes, checks=["hf", "ngc", "token_factory"]
+    )
+
+    assert [r.name for r in results] == ["hf", "ngc", "token_factory"]
+    assert all(r.status == PASS for r in results)
+
+
+def test_run_credential_preflight_preserves_order_regardless_of_finish_order() -> None:
+    """Result order follows ``checks`` order even when ngc finishes before hf."""
+
+    ngc_done = threading.Event()
+
+    def _hf_validator(token):
+        assert ngc_done.wait(timeout=5), "ngc never signaled completion"
+        return _HFResult(ok=True)
+
+    def _ngc_validator(key):
+        ngc_done.set()
+        return "reachable"
+
+    probes = CredentialProbes(hf_validator=_hf_validator, ngc_validator=_ngc_validator)
+    creds = _Creds(hf_token="hf_x", ngc_api_key="nvapi-x")
+
+    results = run_credential_preflight(creds, probes=probes, checks=["hf", "ngc"])
+    assert [r.name for r in results] == ["hf", "ngc"]
+    assert all(r.status == PASS for r in results)
+
+
+def test_run_credential_preflight_caps_workers_for_repeated_check_names() -> None:
+    """Many duplicate check names must not scale the thread pool 1:1 with them.
+
+    Exactly ``over_cap`` (one more than the distinct-check cap of 5, so 6)
+    duplicate ``"hf"`` checks are submitted, and the probe waits on a
+    barrier that also requires exactly ``over_cap`` parties. Capped at 5
+    concurrent workers, only 5 of the 6 can ever be running at once -- the
+    running 5 are all blocked on the barrier, so none can finish and free a
+    slot for the 6th -- so the barrier can never reach its 6th party and
+    every probe deterministically times out. If the pool were instead sized
+    to ``len(checks)`` (the pre-fix behavior, 6 here), all 6 would run
+    immediately, the barrier would release normally on the first attempt,
+    and no exception would be raised -- so this test fails against that
+    regression.
+    """
+
+    over_cap = len(SUPPORTED_CREDENTIAL_CHECKS) + 1
+    barrier = threading.Barrier(over_cap, timeout=0.3)
+
+    def _hf_validator(token):
+        barrier.wait()
+        return _HFResult(ok=True)
+
+    probes = CredentialProbes(hf_validator=_hf_validator)
+    creds = _Creds(hf_token="hf_x")
+
+    with pytest.raises(threading.BrokenBarrierError):
+        run_credential_preflight(creds, probes=probes, checks=["hf"] * over_cap)
+
+
+def test_run_credential_preflight_propagates_first_ordered_exception() -> None:
+    def _boom(*_args):
+        raise RuntimeError("nebius probe exploded")
+
+    probes = CredentialProbes(nebius_profile_verifier=_boom)
+    creds = _Creds(hf_token="hf_x")
+
+    with pytest.raises(RuntimeError, match="nebius probe exploded"):
+        run_credential_preflight(creds, probes=probes, checks=["nebius", "hf"])
+
+
 def test_has_failure_true_when_any_fail() -> None:
     class _Client:
-        def list_checkpoints(self, uri):
+        def probe_list_access(self, uri):
             raise RuntimeError("403")
 
     creds = _Creds(

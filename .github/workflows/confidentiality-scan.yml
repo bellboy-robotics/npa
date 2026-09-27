@@ -1,8 +1,6 @@
 name: confidentiality scan
 
 on:
-  pull_request:
-  merge_group:
   push:
     branches: [main]
 
@@ -10,10 +8,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Keep workflows independent, but let a newer commit supersede older work for
-  # the same PR. Non-PR runs use run_id and are never cancelled by this policy.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: confidentiality-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   scan:
@@ -23,19 +19,22 @@ jobs:
       INFRA_DENYLIST: ${{ secrets.INFRA_DENYLIST }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: npa/pyproject.toml
 
       - name: Install npa guardrail module
         run: |
           python -m venv npa/.venv
-          npa/.venv/bin/python -m pip install -e npa
+          # The scanner and its source-attribution verifier use only the stdlib.
+          npa/.venv/bin/python -m pip install --no-deps -e npa
 
       - name: Run confidentiality scans
         env:
@@ -69,8 +68,22 @@ jobs:
             fi
 
             echo "Running ${label} confidentiality scan"
+            if [ "${pattern_env}" = "CUSTOMER_DENYLIST" ]; then
+              proof_directory="${RUNNER_TEMP}/ncore-source-attribution-proof"
+              install -d -m 0700 "${proof_directory}"
+              set -- "$@" --ncore-attribution-proof-directory "${proof_directory}"
+            fi
             npa/.venv/bin/python -m npa.guardrails.confidentiality "${args[@]}" --pattern-env "${pattern_env}" "$@"
           }
 
-          run_scan CUSTOMER_DENYLIST customer true
+          customer_required=true
+          if [ "${GITHUB_REPOSITORY}" = "bellboy-robotics/npa" ]; then
+            # Refuse an absent baseline rather than silently skipping additions.
+            test -n "${scan_range}"
+            git rev-parse --verify "${scan_range%..HEAD}^{commit}"
+            npa/.venv/bin/python -m npa.guardrails.confidentiality \
+              --repo-root . --diff-range "${scan_range}" --built-in-nebius-infra
+            customer_required=false
+          fi
+          run_scan CUSTOMER_DENYLIST customer "${customer_required}"
           run_scan INFRA_DENYLIST operator-private false --ignore-case

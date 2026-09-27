@@ -23,10 +23,20 @@ and enforced by `npa/docker/workbench/packaging-contract.yaml`.
   not an active GitHub Actions workflow. It defines scheduled CPU checks and
   an optional GPU job. Its presence does not establish nightly GPU validation.
 - **Image CVE / config scanning:** handled separately by the weekly
-  `image-security-scan.yml` (Trivy config scan + base-image CVE matrix).
+  `image-security-scan.yml` (Trivy config scan + complete base-image CVE inventory).
 
 The active [GPU e2e preflight](../../.github/workflows/e2e.yml) collects tests
 and checks shell syntax. It does not execute GPU workloads.
+
+Gymnasium-Robotics appears in the machine-readable manifest as an internal
+development-candidate record with `needs-image-update`. This records the future real
+MuJoCo/EGL gate without registering a supported image. The neutral candidate
+must contain no upstream source, Shadow asset, MuJoCo/Python workload runtime,
+or populated cache; its Dockerfile refuses before package network access when
+the exact signed-snapshot bootstrap or corresponding-source locks differ. An
+owner-only reference build supplied exact config and ordered-layer scanner
+anchors but did not complete the product scan or leave an accepted artifact. No
+golden evaluation, accepted image, or public availability is claimed.
 
 ## CLI
 
@@ -103,6 +113,10 @@ flowchart TB
 | container | registry tag | eval kind | capabilities tested | gpu | status |
 | --- | --- | --- | --- | --- | --- |
 | `base-cuda13-b300` | *(foundation)* | build-import | torch+CUDA; flash_attn import | required | blocked-on-upstream |
+| `diffusers` | `0.38.0-rtfetch-20260916` | container-smoke | native CogVideoX generation; decoded MP4 and hashes; separate workflows qualify Mochi, Wan and depth | required | gpu-gated |
+| `lingbot-world` | `a43bec7-rtfetch-20260916` | container-smoke | native camera-conditioned generation; positive attention/all-to-all on four ranks; decoded MP4 | required | gpu-gated |
+| `sam3` | `3.1-unbuilt` | container-smoke | SAM 3.1 text-prompted video masks; aligned decoded overlay; exact provenance; GPU proof pending | required | gpu-gated |
+| `sam2` | `2.1-rtfetch-20260916` | container-smoke | native video-mask propagation; retained arrays; color-checked, decoded overlay | required | gpu-gated |
 | `groot` | `0.1.0` | container-smoke | GR00T repo; uv; standalone inference | required | gpu-gated |
 | `lerobot` | `0.5.1` (default) | container-smoke | version; 50-step PushT train; checkpoint; eval; output | required | gpu-gated |
 | `lerobot` | `0.6.0` (additional) | container-smoke | same suite with `NPA_LEROBOT_VERSION=0.6.0` / `npa-lerobot:0.6.0` | optional | gpu-gated |
@@ -113,12 +127,12 @@ flowchart TB
 | `content-agents` | `0.5.2-npa2` | container-smoke | exact OVRTX runtime fetch; real rigid-physics authoring; upstream validation + render | required | gpu-gated |
 | `cosmos` | `cu128-torch27-sm100-1.0.9-20260803T002017Z` | container-smoke | version; model load; single inference (safety on) | required | gpu-gated |
 | `cosmos2-transfer` | `2.5.1-sim2real-coherent-20260904` | container-smoke | procedural input; four real diffusion steps; decoded, numerically validated output MP4; guardrails enabled | required | gpu-gated |
-| `cosmos3` | `1.2.2-cu130-r6` | container-smoke | real Cosmos 3 text2image generation; decodable image; guardrails on | required | gpu-gated |
+| `cosmos3` | `1.2.2-cu130-r7` | container-smoke | real Cosmos3-Nano text2image generation; decodable image; Blocklist, Qwen3Guard, and generated-media safety execution attested | required | gpu-gated |
 | `cosmos3-nano-video` | operator-controlled immutable image | container-smoke | real BF16 TP=1 diffusion; three-chunk rollout with V2V continuations; four fully decoded MP4s; 30-second 480p result and measured memory/latency | required | gpu-gated |
 | `cosmos3-reason` | `cuda13-b300-3.0.1-sm80-sm90-sm100-sm103-sm120-20260803T034152Z` | container-smoke | CUDA; real Reason VLM pass | optional | gpu-gated |
 | `sonic` | `0.1.2` | entrypoint-smoke | `/entrypoint.sh smoke`; GPU proofs; JSON artifact | required | gpu-gated |
 | `retargeting` | `0.1.1` | container-smoke | validate_motion_lib on synthetic motion | none | ready |
-| `fiftyone` | `1.15.0.post1` | container-smoke | import+version; CLI; app config (env smoke) | none | ready |
+| `fiftyone` | `1.21.0-skypilot-v1-20260915` | container-smoke | version; dataset creation/query; Brain curation; loopback App launch (functional smoke) | none | ready |
 | `lancedb` | `0.30.3` | server-smoke | server start; create table; vector query; list | optional | ready |
 | `detection-training` | `bdd100k-golden-eval-smoke-*` | server-smoke | server start; `/health`; `/system-info` | optional | ready |
 | `sim2real-control` | `0.1.2-sim2real-coherent-20260904` | container-smoke | load canonical graph; expand promote and loop-back plans across all 14 stages; exact-source guard | none | ready |
@@ -130,6 +144,15 @@ flowchart TB
 
 Machine-readable probes: ``npa/src/npa/smoke/capabilities.py`` (enforced by
 ``npa/tests/smoke/test_golden_eval_capabilities.py``).
+
+The FiftyOne source golden now selects the standalone CPU functional smoke.
+The historical env-smoke result below remains evidence for that older check.
+The candidate implements the source annex and image validator. The rebuilt
+image still needs its source-delivery, bootstrap, dependency and functional
+gates before publication; see the
+[candidate release requirements](../../npa/docker/workbench/fiftyone/RELEASE.md).
+The validator's ASGI root-response CORS check and the smoke's TCP App
+readiness are separate checks; they do not establish media-route CORS coverage.
 
 ## Golden-eval kinds
 
@@ -185,6 +208,19 @@ ready `sshd`, `rsync`, and worker-argument forwarding. This validates the image
 set and its individual capabilities; the complete 14-stage run remains open
 because the required hosted Cosmos3 model returned an upstream stopped-model
 response before any workflow task launched.
+
+### OpenArm dual-simulator release (2026-09-15)
+
+The exact `npa-openarm:2.2.0-isaac0.1.0-rtfetch` release digest passed the
+complete public-image byte, vulnerability, secret, license, SBOM, provenance,
+and anonymous-pull gates. The image's ordinary golden evaluation executed a
+real 500-step OpenArm v2 MuJoCo rollout; the release qualification additionally
+ran the upstream Isaac Lab reach environment and upstream RSL-RL trainer on RTX
+PRO 6000, producing finite traces, a fully decoded simulator-rendered video,
+and a serialized checkpoint. The final workflow stage and a separate
+read-after-run validation agreed on all artifact hashes. Isaac Sim/Lab remained
+an operator-authorized runtime fetch and no vendor runtime or cache bytes were
+published.
 
 ### Bugs the golden evals surfaced (now fixed)
 
@@ -321,6 +357,8 @@ pipeline. Key safety notes are condensed below.
   public ingress without auth. `lancedb` and `detection-training` ship a token
   auth mode and warn loudly when started with `auth_mode=none` (the golden eval
   uses `none` against a throwaway store/port only).
+  FiftyOne binds its App to loopback and uses authenticated SSH or Kubernetes
+  port-forwarding for operator access.
 - **Content safety** — `cosmos` ships a content-safety guardrail.
   `COSMOS_DISABLE_SAFETY` must remain `"0"` in production; the functional smoke
   keeps safety enabled by default.
@@ -369,7 +407,7 @@ Run these inside the corresponding built image (or via
 - `cosmos3-reason` — `python -m npa.workflows.sim2real_loop inner-loop --help`
 - `sonic` — `/entrypoint.sh smoke` (artifact: `sonic_smoke_result.json`)
 - `retargeting` — `python -c "import npa.workbench.retargeting"`
-- `fiftyone` — `python -m npa.smoke.test_fiftyone_functional` (env: `test_fiftyone_env`)
+- `fiftyone` — `python /opt/npa/docker/workbench/fiftyone/smoke_functional.py` (standalone CPU smoke with bundled MongoDB; lighter env check: `smoke_env.py`)
 - `lancedb` — `python -m npa.smoke.test_lancedb_functional`
 - `detection-training` — `python -m npa.smoke.test_detection_training_functional`
 - `sim2real-control` — `python -m npa.smoke.test_sim2real_control_functional`

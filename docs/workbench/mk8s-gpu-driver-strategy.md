@@ -1,5 +1,7 @@
 # Managed Kubernetes GPU driver strategy
 
+[Workbench docs](README.md)
+
 NPA uses one GPU driver policy for both direct `npa cluster` provisioning and
 `npa fleet`: GPU node groups use a Nebius managed-driver image by default, while
 CPU-only node groups and clusters receive no GPU driver settings. The policy is
@@ -7,6 +9,13 @@ topology-independent; it derives expected capacity from the requested node
 count and GPU preset instead of naming a GPU SKU or assuming eight devices.
 
 ## Modes
+
+GPU reservations and driver selection do not supply worker boot-disk quota.
+When tenant quota preflight refuses a deployment, NPA retains the exact byte
+quantities and also reports required, available, and missing capacity in GiB.
+Increase that tenant allowance, release resources you own, or revise the
+declared requirements, then rerun with preflight enabled. Object storage and
+preemptible GPU placement do not increase network-SSD boot-disk allowance.
 
 | Mode | GPU behavior | Intended use |
 | --- | --- | --- |

@@ -11,18 +11,21 @@ import os
 import shutil
 import sys
 import webbrowser
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 import typer
 
-from npa.clients.credentials import load_credentials
+from npa.clients.config import ConfigError, list_projects, resolve_project_storage
+from npa.clients.credentials import CredentialsConfig, load_credentials
 from npa.clients.huggingface import validate_hf_access, validate_hf_identity
 from npa.clients.kube import run_kubectl
 from npa.clients.nebius_auth import ProfileVerification, nebius_profile, verify_profile
+from npa.clients.project_credential_store import ProjectCredentialStoreError
 from npa.clients.storage import StorageClient
 from npa.guardrails.skypilot import inspect_image_exists
-from npa.lifecycle_intent import json_stdout_contract
+from npa.lifecycle_intent import OperationIntent, intent_boundary, json_stdout_contract
 from npa.workflows.credential_preflight import (
     DEFAULT_CREDENTIAL_CHECKS,
     SUPPORTED_CREDENTIAL_CHECKS,
@@ -31,6 +34,7 @@ from npa.workflows.credential_preflight import (
 )
 from npa.workflows.sim2real_health import (
     ALL_CHECKS,
+    CheckResult,
     DoctorProbes,
     FAIL,
     KubeResult,
@@ -54,6 +58,14 @@ app = typer.Typer(
 )
 
 _STATUS_ICON = {PASS: "PASS", WARN: "WARN", FAIL: "FAIL", SKIP: "SKIP"}
+_PREFLIGHT_CHECKS_HELP = (
+    "Comma-separated checks to run, or 'all'. "
+    f"Choices: all, {', '.join(SUPPORTED_CREDENTIAL_CHECKS)}."
+)
+_PREFLIGHT_OFFLINE_HELP = (
+    "Skip live provider probes; credential checks use presence only and "
+    "Nebius CLI authentication is skipped."
+)
 
 
 def _repo_root() -> Path:
@@ -107,6 +119,16 @@ def _token_factory_verifier() -> list[str]:
     return TokenFactoryClient(config=config).list_models()
 
 
+def _encord_verifier() -> str:
+    """Authenticate and make the cheapest read-only Encord call."""
+
+    from npa.workbench.encord.client import _default_user_client
+
+    client = _default_user_client()
+    next(iter(client.list_storage_folders(page_size=1)), None)
+    return "storage folders listable"
+
+
 def _ngc_auth_verifier(api_key: str) -> str:
     """Authenticate through NGC token exchange without implying all entitlements."""
 
@@ -121,24 +143,131 @@ def _nebius_profile_verifier() -> ProfileVerification:
     return verify_profile(nebius_profile())
 
 
-@app.command("preflight")
+def _selected_checks(checks: str) -> list[str]:
+    selected = list(
+        dict.fromkeys(item.strip() for item in checks.split(",") if item.strip())
+    )
+    if not selected:
+        raise typer.BadParameter(
+            "select at least one check or 'all'.", param_hint="--checks"
+        )
+    unknown = [
+        item
+        for item in selected
+        if item != "all" and item not in SUPPORTED_CREDENTIAL_CHECKS
+    ]
+    if unknown:
+        raise typer.BadParameter(
+            "unknown check(s): "
+            f"{', '.join(unknown)}. Choices: all, {', '.join(SUPPORTED_CREDENTIAL_CHECKS)}.",
+            param_hint="--checks",
+        )
+    return list(SUPPORTED_CREDENTIAL_CHECKS) if "all" in selected else selected
+
+
+def _project_credentials(
+    project: str, credentials: CredentialsConfig
+) -> CredentialsConfig:
+    if project not in list_projects():
+        raise ConfigError(
+            "Unknown project alias. Pass an alias saved by `npa configure`."
+        )
+    storage = resolve_project_storage(
+        project,
+        include_shared_credentials=False,
+        include_environment=False,
+    )
+    if not all(
+        (
+            storage.checkpoint_bucket,
+            storage.endpoint_url,
+            storage.aws_access_key_id,
+            storage.aws_secret_access_key,
+        )
+    ):
+        raise ConfigError(
+            "Configure a bucket, endpoint, and S3 key pair for this project."
+        )
+    bucket = storage.checkpoint_bucket
+    if "://" not in bucket:
+        bucket = f"s3://{bucket}"
+    return replace(
+        credentials,
+        s3_bucket=bucket,
+        s3_endpoint=storage.endpoint_url,
+        s3_access_key_id=storage.aws_access_key_id,
+        s3_secret_access_key=storage.aws_secret_access_key,
+    )
+
+
+def _credential_probes(
+    credentials: CredentialsConfig, *, offline: bool
+) -> CredentialProbes:
+    if offline:
+        return CredentialProbes()
+    return CredentialProbes(
+        hf_validator=validate_hf_identity,
+        ngc_validator=_ngc_auth_verifier,
+        s3_client_factory=lambda: StorageClient.from_environment(
+            endpoint_url=credentials.s3_endpoint,
+            aws_access_key_id=credentials.s3_access_key_id,
+            aws_secret_access_key=credentials.s3_secret_access_key,
+        ),
+        token_factory_verifier=_token_factory_verifier,
+        encord_verifier=_encord_verifier,
+        nebius_profile_verifier=_nebius_profile_verifier,
+    )
+
+
+def _credential_results(
+    checks: list[str], *, project: str, offline: bool
+) -> list[CheckResult]:
+    credentials = load_credentials()
+    storage_failure = None
+    if project and "s3" in checks:
+        try:
+            credentials = _project_credentials(project, credentials)
+        except (ConfigError, ProjectCredentialStoreError) as exc:
+            storage_failure = CheckResult(
+                name="s3",
+                status=FAIL,
+                summary="Selected project storage is not configured.",
+                remedy=str(exc),
+            )
+    probe_checks = [name for name in checks if not (storage_failure and name == "s3")]
+    results = run_credential_preflight(
+        credentials,
+        probes=_credential_probes(credentials, offline=offline),
+        checks=probe_checks,
+    )
+    by_name = {result.name: result for result in results}
+    if storage_failure:
+        by_name["s3"] = storage_failure
+    return [by_name[name] for name in checks]
+
+
+@app.command(
+    "preflight",
+    help="Validate service credentials and optional Nebius CLI authentication.",
+)
+@intent_boundary(OperationIntent.OBSERVE)
 @json_stdout_contract
 def preflight_command(
+    project: str = typer.Option(
+        "",
+        "--project",
+        "-p",
+        help="Configured project alias for the S3 check; other checks keep their credential selection.",
+    ),
     checks: str = typer.Option(
         ",".join(DEFAULT_CREDENTIAL_CHECKS),
         "--checks",
-        help=(
-            "Comma-separated checks to run, or 'all'. "
-            f"Choices: all, {', '.join(SUPPORTED_CREDENTIAL_CHECKS)}."
-        ),
+        help=_PREFLIGHT_CHECKS_HELP,
     ),
     offline: bool = typer.Option(
         False,
         "--offline",
-        help=(
-            "Skip live provider probes; credential checks use presence only and "
-            "Nebius CLI authentication is skipped."
-        ),
+        help=_PREFLIGHT_OFFLINE_HELP,
     ),
     warn_only: bool = typer.Option(
         False, "--warn-only", help="Exit 0 even when a check fails."
@@ -147,45 +276,25 @@ def preflight_command(
 ) -> None:
     """Validate service credentials and optional Nebius CLI authentication.
 
-    A single PASS/WARN/FAIL/SKIP report over the credentials nearly every
-    workbench tool needs, so cold-start credential gaps surface here instead of
-    mid-run. Exits non-zero on any FAIL unless ``--warn-only`` is passed.
+    Args:
+        project: Optional configured project alias for the S3 check.
+        checks: Comma-separated checks or all.
+        offline: Report presence without provider requests.
+        warn_only: Return success even when a check fails.
+        output_json: Emit one JSON report instead of text.
+
+    Returns:
+        None.
+
+    Raises:
+        typer.BadParameter: The check selection is invalid.
+        typer.Exit: A check failed and warn_only is false.
     """
-
-    selected = list(dict.fromkeys(item.strip() for item in checks.split(",") if item.strip()))
-    if not selected:
-        raise typer.BadParameter("select at least one check or 'all'.", param_hint="--checks")
-    unknown = [
-        item for item in selected if item != "all" and item not in SUPPORTED_CREDENTIAL_CHECKS
-    ]
-    if unknown:
-        raise typer.BadParameter(
-            "unknown check(s): "
-            f"{', '.join(unknown)}. Choices: all, {', '.join(SUPPORTED_CREDENTIAL_CHECKS)}.",
-            param_hint="--checks",
-        )
-    if "all" in selected:
-        selected = list(SUPPORTED_CREDENTIAL_CHECKS)
-
-    credentials = load_credentials()
-    if offline:
-        probes = CredentialProbes()
-    else:
-        probes = CredentialProbes(
-            hf_validator=validate_hf_identity,
-            ngc_validator=_ngc_auth_verifier,
-            # Probe with the resolved credentials (endpoint/keys often live in
-            # ~/.npa rather than the process env), not env-only defaults.
-            s3_client_factory=lambda: StorageClient.from_environment(
-                endpoint_url=credentials.s3_endpoint,
-                aws_access_key_id=credentials.s3_access_key_id,
-                aws_secret_access_key=credentials.s3_secret_access_key,
-            ),
-            token_factory_verifier=_token_factory_verifier,
-            nebius_profile_verifier=_nebius_profile_verifier,
-        )
-
-    results = run_credential_preflight(credentials, probes=probes, checks=selected)
+    results = _credential_results(
+        _selected_checks(checks),
+        project=project.strip(),
+        offline=offline,
+    )
     _emit_results(results, output_json=output_json)
 
     if has_failure(results) and not warn_only:
@@ -205,7 +314,7 @@ def access_command(
     offline: bool = typer.Option(
         False,
         "--offline",
-        help="Skip live Hugging Face probes; only check that a token is present.",
+        help="Skip live HF and NGC probes; only check credential presence.",
     ),
     save_env_credentials: bool = typer.Option(
         False,
@@ -290,9 +399,9 @@ def access_command(
 
     ngc_validator = None
     if not offline:
-        from npa.workbench.nurec.nurec import check_ngc_image_access
+        from npa.workbench.model_access import check_ngc_artifact_access
 
-        ngc_validator = check_ngc_image_access
+        ngc_validator = check_ngc_artifact_access
 
     if prepare:
         from npa.workbench.access_approval import (
@@ -326,12 +435,7 @@ def access_command(
         plan = approval_plan(evidence, resume_command=resume)
         if open_pages and output_json:
             raise typer.BadParameter("--open-pages cannot be combined with --json")
-        if (
-            not open_pages
-            and not output_json
-            and blocked(plan)
-            and sys.stdin.isatty()
-        ):
+        if not open_pages and not output_json and blocked(plan) and sys.stdin.isatty():
             counts = plan["counts"]
             open_pages = typer.confirm(
                 "This catalog needs approval for "
@@ -386,7 +490,7 @@ def access_command(
         raise typer.Exit(code=1)
 
 
-@app.command("sim2real", hidden=True)
+@app.command("sim2real")
 def sim2real_command(
     run_id: str = typer.Option(
         "sim2real-doctor", "--run-id", help="Run id for the probed config."
@@ -467,8 +571,12 @@ def sim2real_command(
 ) -> None:
     """Validate a sim2real config and check the recurring blockers up front.
 
-    Deprecated: use ``npa workbench workflow submit`` on the sim2real runbook for
-    preflight and ``npa workbench workflow status <run-id>`` for live progress.
+    Runs the sim2real preflight suite (config, coherence, s3, registry,
+    tokens, cluster) before submitting the sim2real workflow, so S3,
+    registry, token, kube-context, and GPU blockers surface before launch
+    instead of mid-run. Use ``npa workbench workflow submit`` on the sim2real
+    runbook for the run itself and ``npa workbench workflow status <run-id>``
+    for live progress.
     """
 
     overrides: dict[str, object] = {

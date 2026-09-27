@@ -24,12 +24,15 @@ jobs:
     runs-on: ubuntu-latest
     # Encrypted test key; selected-branch protection must permit only main and
     # the explicitly reviewed continuation branch. No pull_request_target.
-    environment: token-factory-live
+    # Live API checks need environment secrets without deployment history.
+    environment:
+      name: token-factory-live
+      deployment: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install isolated test runtime
@@ -63,7 +66,7 @@ jobs:
           NEBIUS_TOKEN_FACTORY_BASE_URL: ${{ secrets.NEBIUS_TOKEN_FACTORY_BASE_URL }}
           NPA_TF_RECHECK_SCOPE: ${{ vars.NPA_TF_RECHECK_SCOPE || 'authorized-account' }}
           NPA_TF_RECHECK_REQUIRED_MODELS: ${{ vars.NPA_TF_RECHECK_REQUIRED_MODELS }}
-          NPA_TF_RECHECK_JSON_BASELINE: ${{ vars.NPA_TF_RECHECK_JSON_BASELINE || 'malformed_json' }}
+          NPA_TF_RECHECK_JSON_BASELINE: ${{ vars.NPA_TF_RECHECK_JSON_BASELINE || 'healthy' }}
         run: npa/.venv/bin/python npa/scripts/token_factory_live_recheck.py --evidence-dir "$RUNNER_TEMP/token-factory-live"
       - name: Publish sanitized result and failure visibility
         if: always()
@@ -76,7 +79,7 @@ jobs:
           fi
       - name: Upload sanitized machine-readable receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: token-factory-live-receipt
           path: |

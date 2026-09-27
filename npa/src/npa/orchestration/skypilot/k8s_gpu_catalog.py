@@ -15,8 +15,10 @@ makes ``NAME:2`` unschedulable on a fleet of single-GPU nodes.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import fcntl
 import hashlib
 import json
 import os
@@ -24,6 +26,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import uuid
 
 from npa.orchestration.skypilot._bin import SkyBin, resolve_sky_bin
 from npa.orchestration.skypilot.gpu_catalog import (
@@ -38,6 +41,10 @@ DEFAULT_READINESS_POLL_SECONDS = 10.0
 
 class KubernetesGpuCatalogError(RuntimeError):
     """Raised when the live Kubernetes GPU catalog cannot be discovered."""
+
+
+class PendingGpuPlacementError(KubernetesGpuCatalogError):
+    """Active unbound GPU demand makes shared placement indeterminate."""
 
 
 class UnsatisfiableAcceleratorError(ValueError):
@@ -81,68 +88,245 @@ def _kubeconfig_env(kubeconfig: Kubeconfig) -> dict[str, str] | None:
     return env
 
 
+@contextmanager
+def _validation_scope_recovery_lock(scope: Path):
+    """Serialize a narrow stale-validation-state recovery for one scope."""
+
+    lock_path = scope / ".validation-recovery.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _recover_idle_validation_scope(
+    scope: Path,
+    *,
+    context: str,
+    kubeconfig_path: Path,
+    user_id: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    stop_api: Callable[[Path], None] | None = None,
+) -> bool:
+    """Archive stale validation runtime only after exact controller absence.
+
+    GPU catalog discovery owns a separate SkyPilot API scope.  That API has no
+    workload authority except its deterministic jobs-controller pod, so an
+    identity-bound stopped receipt may be retired only when the exact controller
+    pod selector proves empty.  Query failure and any live pod fail closed.
+    """
+
+    expected_user_id = str(user_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", expected_user_id):
+        return False
+    if scope.is_symlink() or not scope.is_dir():
+        return False
+    command = [
+        "kubectl",
+        "--kubeconfig",
+        str(kubeconfig_path),
+        "--context",
+        str(context),
+        "get",
+        "pods",
+        "--all-namespaces",
+        "--selector",
+        f"skypilot-cluster-name=sky-jobs-controller-{expected_user_id}",
+        "--output",
+        "json",
+    ]
+    try:
+        result = runner(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+            env=_kubeconfig_env(kubeconfig_path),
+        )
+        payload = json.loads(result.stdout or "{}") if result.returncode == 0 else {}
+        pods = payload.get("items") if isinstance(payload, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    if not isinstance(pods, list) or pods:
+        return False
+
+    from npa.orchestration.skypilot import local_api
+
+    stop = stop_api or local_api.stop_isolated_api
+    try:
+        with _validation_scope_recovery_lock(scope):
+            # Recheck while holding the lock: a recovery is only safe for an
+            # exact empty selector, never because a prior read happened to be
+            # empty.
+            result = runner(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+                env=_kubeconfig_env(kubeconfig_path),
+            )
+            payload = (
+                json.loads(result.stdout or "{}") if result.returncode == 0 else {}
+            )
+            pods = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(pods, list) or pods:
+                return False
+            stop(scope)
+            archive = scope / f"retired-{uuid.uuid4().hex}"
+            archive.mkdir(mode=0o700)
+            for name in ("home", "sky-runtime", "local-api", "client-config.yaml"):
+                source = scope / name
+                if source.exists() or source.is_symlink():
+                    os.replace(source, archive / name)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def _is_stale_validation_api_error(error: Exception) -> bool:
+    """Return whether an idle validation API receipt may be safely retired."""
+
+    detail = str(error).lower()
+    markers = (
+        "recovery requires the original executing identity and credential configuration",
+        "recovery requires the original selected npa configuration",
+        "running isolated skypilot api has a different executing identity",
+        "running isolated skypilot api has a different verified configuration",
+        "credential configuration changed after verification",
+        "verified configuration changed on disk",
+        "process environment disagrees with its ownership record",
+    )
+    return any(marker in detail for marker in markers)
+
+
 def kubernetes_sky_environment(
-    *, context: str, kubeconfig: Kubeconfig, sky_executable: str,
+    *,
+    context: str,
+    kubeconfig: Kubeconfig,
+    sky_executable: str,
 ) -> dict[str, str]:
-    """Bind cluster checks and discovery to one exact owned API when isolated."""
+    """Bind cluster checks and discovery to one exact owned API session."""
     env = _kubeconfig_env(kubeconfig) or os.environ.copy()
     from npa.orchestration.skypilot._bin import resolve_isolated_config_dir
+    from npa.orchestration.skypilot.cluster_validation import current_validation_session
 
+    session = current_validation_session()
     isolated_root = resolve_isolated_config_dir()
-    if isolated_root is not None:
-        selected = str(kubeconfig or env.get("KUBECONFIG") or "").strip()
-        if not selected or not str(context).strip():
-            raise KubernetesGpuCatalogError(
-                "Isolated SkyPilot discovery requires an exact kubeconfig and context"
-            )
-        kubeconfig_path = Path(selected).expanduser().resolve(strict=True)
-        env["KUBECONFIG"] = str(kubeconfig_path)
-        # Cluster validation may launch a GPU task. It must never fall through
-        # to the operator's shared API, even before workflow submission exists.
-        from npa.orchestration.skypilot.cleanup import sky_environment
-        from npa.orchestration.skypilot.local_api import ensure_isolated_api
-        import yaml
+    if session is None and isolated_root is None:
+        return env
+    selected = str(kubeconfig or env.get("KUBECONFIG") or "").strip()
+    if not selected or not str(context).strip():
+        raise KubernetesGpuCatalogError(
+            "Isolated SkyPilot discovery requires an exact kubeconfig and context"
+        )
+    kubeconfig_path = Path(selected).expanduser().resolve(strict=True)
+    env["KUBECONFIG"] = str(kubeconfig_path)
+    if session is not None:
+        session.require_target(kubeconfig_path, context)
+        env["SKYPILOT_USER_ID"] = (
+            "npa-"
+            + hashlib.sha256(str(session.scope.resolve()).encode()).hexdigest()[:12]
+        )
+        if session.record.get("project_alias"):
+            env["NPA_SKYPILOT_PROJECT"] = session.record["project_alias"]
 
-        identity = hashlib.sha256(
-            f"{kubeconfig_path.resolve()}\0{context}".encode()
-        ).hexdigest()[:24]
-        scope = isolated_root / "cluster-validation" / identity
-        scope.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if scope.is_symlink():
-            raise RuntimeError("Cluster validation state must not be a symlink")
-        config: dict = {}
-        inherited = str(env.get("SKYPILOT_GLOBAL_CONFIG") or "")
-        if inherited:
-            config = yaml.safe_load(Path(inherited).read_text(encoding="utf-8")) or {}
-            if not isinstance(config, dict):
-                raise RuntimeError("SkyPilot configuration must be a mapping")
-        kubernetes = config.setdefault("kubernetes", {})
-        if not isinstance(kubernetes, dict):
-            raise RuntimeError("SkyPilot Kubernetes configuration must be a mapping")
-        kubernetes["allowed_contexts"] = [context]
-        config_bytes = yaml.safe_dump(config, sort_keys=True).encode()
-        config_path = scope / "client-config.yaml"
-        try:
-            fd = os.open(config_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if config_path.is_symlink() or config_path.read_bytes() != config_bytes:
+    identity = hashlib.sha256(
+        f"{kubeconfig_path.resolve()}\0{context}".encode()
+    ).hexdigest()[:24]
+    scope = (
+        session.scope
+        if session is not None
+        else isolated_root / "cluster-validation" / identity
+    )
+    scope.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if scope.is_symlink():
+        raise RuntimeError("Cluster validation state must not be a symlink")
+    from npa.orchestration.skypilot.cleanup import sky_environment
+    from npa.orchestration.skypilot import local_api
+    from npa.orchestration.skypilot.local_api import ensure_isolated_api
+    import yaml
+
+    validation_user_id = str(env.get("SKYPILOT_USER_ID") or "").strip()
+    if not validation_user_id:
+        validation_user_id = (
+            "npa-" + hashlib.sha256(str(scope.resolve()).encode()).hexdigest()[:12]
+        )
+    config: dict = {}
+    inherited = str(env.get("SKYPILOT_GLOBAL_CONFIG") or "")
+    if inherited:
+        config = yaml.safe_load(Path(inherited).read_text(encoding="utf-8")) or {}
+        if not isinstance(config, dict):
+            raise RuntimeError("SkyPilot configuration must be a mapping")
+    kubernetes = config.setdefault("kubernetes", {})
+    if not isinstance(kubernetes, dict):
+        raise RuntimeError("SkyPilot Kubernetes configuration must be a mapping")
+    kubernetes["allowed_contexts"] = [context]
+    config["allowed_clouds"] = ["kubernetes"]
+    config_bytes = yaml.safe_dump(config, sort_keys=True).encode()
+    config_path = scope / "client-config.yaml"
+    write_config = False
+    try:
+        fd = os.open(config_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        write_config = True
+    except FileExistsError:
+        if config_path.is_symlink() or config_path.read_bytes() != config_bytes:
+            if config_path.is_symlink() or not _recover_idle_validation_scope(
+                scope,
+                context=context,
+                kubeconfig_path=kubeconfig_path,
+                user_id=validation_user_id,
+            ):
                 raise RuntimeError(
                     "Cluster validation configuration changed; reconcile its owned API first"
                 ) from None
-        else:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(config_bytes)
-                handle.flush()
-                os.fsync(handle.fileno())
-        env["SKYPILOT_GLOBAL_CONFIG"] = str(config_path)
-        env = sky_environment(scope, environment=env)
+            fd = os.open(config_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            write_config = True
+    if write_config:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(config_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+    env["SKYPILOT_GLOBAL_CONFIG"] = str(config_path)
+    base_environment = dict(env)
+
+    def start_validation_api() -> dict[str, str]:
+        validation_env = sky_environment(scope, environment=base_environment)
         ensure_isolated_api(
             isolated_dir=scope,
             sky_executable=sky_executable,
-            environment=env,
-            cwd=str(kubeconfig_path.parent),
+            environment=validation_env,
+            cwd=str(scope),
         )
-    return env
+        return validation_env
+
+    try:
+        return start_validation_api()
+    except local_api.IsolatedApiError as exc:
+        if not _is_stale_validation_api_error(
+            exc
+        ) or not _recover_idle_validation_scope(
+            scope,
+            context=context,
+            kubeconfig_path=kubeconfig_path,
+            user_id=validation_user_id,
+        ):
+            raise
+        # Recovery archives the client configuration along with the stale API.
+        # Recreate the same verified bytes before starting its replacement.
+        with open(
+            config_path, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)
+        ) as handle:
+            handle.write(config_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return start_validation_api()
 
 
 def _kubectl_failure(*, action: str, returncode: int, output: str) -> str:
@@ -386,36 +570,29 @@ def _pod_commitment(pod: object) -> tuple[str, int, int, int, int, int]:
         (_gpu_quantity(item) for item in spec.get("initContainers") or []),
         default=0,
     )
-    regular_cpu = sum(_container_request(item, "cpu") for item in containers)
-    init_cpu = max(
-        (_container_request(item, "cpu") for item in init_containers), default=0
-    )
-    regular_memory = sum(_container_request(item, "memory") for item in containers)
-    init_memory = max(
-        (_container_request(item, "memory") for item in init_containers), default=0
-    )
     overhead = spec.get("overhead") or {}
-    overhead_cpu = (
-        _cpu_millis(overhead.get("cpu", 0)) if isinstance(overhead, dict) else 0
-    )
-    overhead_memory = (
-        _memory_bytes(overhead.get("memory", 0)) if isinstance(overhead, dict) else 0
-    )
-    regular_storage = sum(_container_request(item, "ephemeral-storage") for item in containers)
-    init_storage = max(
-        (_container_request(item, "ephemeral-storage") for item in init_containers), default=0
-    )
-    overhead_storage = (
-        _memory_bytes(overhead.get("ephemeral-storage", 0)) if isinstance(overhead, dict) else 0
-    )
     return (
         node_name,
         max(regular_gpu, init_gpu),
-        max(regular_cpu, init_cpu) + overhead_cpu,
-        max(regular_memory, init_memory) + overhead_memory,
+        _pod_resource_commitment(containers, init_containers, overhead, "cpu"),
+        _pod_resource_commitment(containers, init_containers, overhead, "memory"),
         1,
-        max(regular_storage, init_storage) + overhead_storage,
+        _pod_resource_commitment(
+            containers, init_containers, overhead, "ephemeral-storage"
+        ),
     )
+
+
+def _pod_resource_commitment(containers, init_containers, overhead, resource):
+    regular = sum(_container_request(item, resource) for item in containers)
+    initial = max(
+        (_container_request(item, resource) for item in init_containers), default=0
+    )
+    raw_overhead = overhead.get(resource, 0) if isinstance(overhead, dict) else 0
+    extra = (
+        _cpu_millis(raw_overhead) if resource == "cpu" else _memory_bytes(raw_overhead)
+    )
+    return max(regular, initial) + extra
 
 
 def discover_kubernetes_gpu_inventory(
@@ -557,7 +734,9 @@ def discover_kubernetes_gpu_inventory(
         node_capacity = int((status.get("capacity") or {}).get("nvidia.com/gpu", 0))
         node_cpu = _cpu_millis((status.get("allocatable") or {}).get("cpu", 0))
         node_memory = _memory_bytes((status.get("allocatable") or {}).get("memory", 0))
-        node_storage = _memory_bytes((status.get("allocatable") or {}).get("ephemeral-storage", 0))
+        node_storage = _memory_bytes(
+            (status.get("allocatable") or {}).get("ephemeral-storage", 0)
+        )
         try:
             node_pods = max(0, int((status.get("allocatable") or {}).get("pods", 0)))
         except (TypeError, ValueError):
@@ -590,9 +769,13 @@ def discover_kubernetes_gpu_inventory(
             ):
                 if value:
                     node_products.add(value)
-        committed, committed_cpu, committed_memory, committed_pods, committed_storage = (
-            committed_by_node.get(name, (0, 0, 0, 0, 0))
-        )
+        (
+            committed,
+            committed_cpu,
+            committed_memory,
+            committed_pods,
+            committed_storage,
+        ) = committed_by_node.get(name, (0, 0, 0, 0, 0))
         free = max(0, node_allocatable - committed)
         free_cpu = max(0, node_cpu - committed_cpu)
         free_memory = max(0, node_memory - committed_memory)
@@ -630,7 +813,9 @@ def discover_kubernetes_gpu_inventory(
                     labels=tuple(sorted(all_labels.items())),
                     allocatable_ephemeral_storage_bytes=node_storage,
                     committed_ephemeral_storage_bytes=committed_storage,
-                    free_ephemeral_storage_bytes=max(0, node_storage - committed_storage),
+                    free_ephemeral_storage_bytes=max(
+                        0, node_storage - committed_storage
+                    ),
                 )
             )
         if ready and not blocked and node_allocatable > 0:
@@ -782,7 +967,9 @@ class _GangRequirements:
     pod_spec: Mapping[str, object]
 
 
-def _gang_requirements(accelerator, node_count, cpus, memory, ephemeral_storage, allowed_nodes, pod_spec):
+def _gang_requirements(
+    accelerator, node_count, cpus, memory, ephemeral_storage, allowed_nodes, pod_spec
+):
     expected = int(node_count)
     if expected < 1:
         raise ValueError("node_count must be positive")
@@ -794,32 +981,47 @@ def _gang_requirements(accelerator, node_count, cpus, memory, ephemeral_storage,
             "existing-capacity preflight cannot authoritatively evaluate topology "
             "spread constraints"
         )
-    allowed = frozenset(str(name).strip() for name in (allowed_nodes or ()) if str(name).strip())
-    return _GangRequirements(parse_accelerator_request(accelerator), expected,
-                             _cpu_millis(cpus), _memory_bytes(memory),
-                             _memory_bytes(ephemeral_storage), allowed, selected)
+    allowed = frozenset(
+        str(name).strip() for name in (allowed_nodes or ()) if str(name).strip()
+    )
+    return _GangRequirements(
+        parse_accelerator_request(accelerator),
+        expected,
+        _cpu_millis(cpus),
+        _memory_bytes(memory),
+        _memory_bytes(ephemeral_storage),
+        allowed,
+        selected,
+    )
 
 
 def _compatible_gang_nodes(inventory: KubernetesGpuInventory, shape: _GangRequirements):
     wanted = _normalize(shape.accelerator.name)
-    aliases = next((group for group in _EXPLICIT_ACCELERATOR_ALIASES if wanted in group),
-                   frozenset({wanted}))
-    return [node for node in inventory.nodes
-            if (not shape.allowed or node.name in shape.allowed)
-            and _node_matches_pod_spec(node, shape.pod_spec)
-            and any(_normalize(product) in aliases for product in node.products)
-            and node.allocatable >= shape.accelerator.quantity
-            and node.allocatable_cpu_millis >= shape.cpu
-            and node.allocatable_memory_bytes >= shape.memory
-            and node.allocatable_ephemeral_storage_bytes >= shape.storage
-            and node.allocatable_pods >= 1]
+    aliases = next(
+        (group for group in _EXPLICIT_ACCELERATOR_ALIASES if wanted in group),
+        frozenset({wanted}),
+    )
+    return [
+        node
+        for node in inventory.nodes
+        if (not shape.allowed or node.name in shape.allowed)
+        and _node_matches_pod_spec(node, shape.pod_spec)
+        and any(_normalize(product) in aliases for product in node.products)
+        and node.allocatable >= shape.accelerator.quantity
+        and node.allocatable_cpu_millis >= shape.cpu
+        and node.allocatable_memory_bytes >= shape.memory
+        and node.allocatable_ephemeral_storage_bytes >= shape.storage
+        and node.allocatable_pods >= 1
+    ]
 
 
 def _require_free_gang(inventory, shape, compatible_nodes, candidates):
     if len(candidates) < shape.nodes:
-        error = (TemporarilyUnavailableAcceleratorError
-                 if len(compatible_nodes) >= shape.nodes
-                 else PermanentlyUnsatisfiableAcceleratorError)
+        error = (
+            TemporarilyUnavailableAcceleratorError
+            if len(compatible_nodes) >= shape.nodes
+            else PermanentlyUnsatisfiableAcceleratorError
+        )
         raise error(
             f"Kubernetes context {inventory.context or '<current>'} has "
             f"{len(candidates)} distinct compatible schedulable node(s) with at "
@@ -833,7 +1035,7 @@ def _require_free_gang(inventory, shape, compatible_nodes, candidates):
             "aggregate capacity on one node cannot satisfy multiple gang ranks."
         )
     if inventory.unbound_pending_gpu_pods:
-        raise TemporarilyUnavailableAcceleratorError(
+        raise PendingGpuPlacementError(
             "free shared GPU capacity is indeterminate: Kubernetes has "
             f"{inventory.unbound_pending_gpu_pods} active unbound GPU pod(s) "
             f"requesting {inventory.unbound_pending_gpu_requests} GPU(s); wait for "
@@ -842,8 +1044,13 @@ def _require_free_gang(inventory, shape, compatible_nodes, candidates):
 
 
 def preflight_kubernetes_gpu_gang(
-    inventory: KubernetesGpuInventory, *, accelerator: str, node_count: int,
-    cpus: object = 0, memory: object = 0, ephemeral_storage: object = 0,
+    inventory: KubernetesGpuInventory,
+    *,
+    accelerator: str,
+    node_count: int,
+    cpus: object = 0,
+    memory: object = 0,
+    ephemeral_storage: object = 0,
     allowed_nodes: tuple[str, ...] | list[str] | None = None,
     pod_spec: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -862,24 +1069,46 @@ def preflight_kubernetes_gpu_gang(
         Fit evidence; it does not reserve capacity.
     Raises:
         KubernetesGpuCatalogError: Inventory or constraints cannot be verified.
-        ValueError: Invalid shape, unsupported capacity, or temporary occupancy.
+        PendingGpuPlacementError: Active GPU pods still await authoritative placement.
+        TemporarilyUnavailableAcceleratorError: A supported shape is occupied or unavailable.
+        PermanentlyUnsatisfiableAcceleratorError: No existing nodes can fit the shape.
+        ValueError: The requested shape is invalid.
     """
     if inventory.error:
         raise KubernetesGpuCatalogError(inventory.error)
-    shape = _gang_requirements(accelerator, node_count, cpus, memory, ephemeral_storage, allowed_nodes, pod_spec)
+    shape = _gang_requirements(
+        accelerator,
+        node_count,
+        cpus,
+        memory,
+        ephemeral_storage,
+        allowed_nodes,
+        pod_spec,
+    )
     compatible = _compatible_gang_nodes(inventory, shape)
-    candidates = [node for node in compatible if node.ready and node.schedulable
-                  and node.free >= shape.accelerator.quantity
-                  and node.free_cpu_millis >= shape.cpu
-                  and node.free_memory_bytes >= shape.memory
-                  and node.free_ephemeral_storage_bytes >= shape.storage and node.free_pod_slots >= 1]
+    candidates = [
+        node
+        for node in compatible
+        if node.ready
+        and node.schedulable
+        and node.free >= shape.accelerator.quantity
+        and node.free_cpu_millis >= shape.cpu
+        and node.free_memory_bytes >= shape.memory
+        and node.free_ephemeral_storage_bytes >= shape.storage
+        and node.free_pod_slots >= 1
+    ]
     _require_free_gang(inventory, shape, compatible, candidates)
-    return {"context": inventory.context, "accelerator": shape.accelerator.spec,
-            "node_count": shape.nodes, "compatible_free_nodes": len(candidates),
-            "selected_nodes": [node.name for node in candidates[:shape.nodes]],
-            "cpus_per_node": shape.cpu / 1000, "memory_bytes_per_node": shape.memory,
-            "ephemeral_storage_bytes_per_node": shape.storage,
-            "allowed_nodes": sorted(shape.allowed)}
+    return {
+        "context": inventory.context,
+        "accelerator": shape.accelerator.spec,
+        "node_count": shape.nodes,
+        "compatible_free_nodes": len(candidates),
+        "selected_nodes": [node.name for node in candidates[: shape.nodes]],
+        "cpus_per_node": shape.cpu / 1000,
+        "memory_bytes_per_node": shape.memory,
+        "ephemeral_storage_bytes_per_node": shape.storage,
+        "allowed_nodes": sorted(shape.allowed),
+    }
 
 
 @dataclass(frozen=True)
@@ -990,16 +1219,19 @@ def discover_kubernetes_gpu_catalog(
     environment = kubernetes_sky_environment(
         context=context, kubeconfig=kubeconfig, sky_executable=sky_executable
     )
+    run_options: dict[str, object] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "timeout": timeout,
+        "check": False,
+        "env": environment,
+    }
+    session_dir = environment.get("NPA_SKYPILOT_ISOLATED_API_DIR")
+    if session_dir:
+        run_options["cwd"] = Path(session_dir)
     try:
-        result = execute(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=environment,
-        )
+        result = execute(cmd, **run_options)
     except (OSError, subprocess.SubprocessError) as exc:
         raise KubernetesGpuCatalogError(
             f"Unable to run `{' '.join(cmd)}`: {exc}"
@@ -1010,15 +1242,7 @@ def discover_kubernetes_gpu_catalog(
         if config_override:
             check_cmd.extend(["--config", config_override])
         check_cmd.append("kubernetes")
-        checked = execute(
-            check_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=environment,
-        )
+        checked = execute(check_cmd, **run_options)
         checked_output = "\n".join(
             part for part in (checked.stdout, checked.stderr) if part
         )
@@ -1033,15 +1257,7 @@ def discover_kubernetes_gpu_catalog(
                 "SkyPilot Kubernetes discovery was disabled after API-server "
                 f"restart and `sky check kubernetes` failed: {detail}"
             )
-        result = execute(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=environment,
-        )
+        result = execute(cmd, **run_options)
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
@@ -1050,8 +1266,8 @@ def discover_kubernetes_gpu_catalog(
 
 
 _KNOWN_SKYPILOT_LABELS = {
-    "b200": "B200",
-    "nvidiab200": "B200",
+    "b200": "b200",
+    "nvidiab200": "b200",
     "rtx6000": "rtxpro6000",
     "rtxpro6000": "rtxpro6000",
     "rtxpro6000blackwellserveredition": "rtxpro6000",

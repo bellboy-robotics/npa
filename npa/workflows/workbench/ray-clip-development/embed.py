@@ -17,6 +17,7 @@ import worker
 MODEL_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
 WEIGHT_SHA256 = "a63082132ba4f97a80bea76823f544493bffa8082296d62d71581a4feff1576f"
 SOURCE_FILES = ("embed.py", "worker.py", "npa_lancedb_bdd100k_udfs.py")
+BATCHES_PER_ACTOR = 2
 
 
 def sha256(path: Path) -> str:
@@ -55,7 +56,9 @@ def source_hashes() -> dict:
     for name in SOURCE_FILES:
         path = directory / name
         if not path.is_file() or path.is_symlink():
-            raise ValueError("Ray working_dir must contain the application, worker and canonical Workbench UDF")
+            raise ValueError(
+                "Ray working_dir must contain the application, worker and canonical Workbench UDF"
+            )
         hashes[name] = sha256(path)
     return hashes
 
@@ -72,7 +75,9 @@ def application_gcs_address() -> str:
     """
     address = os.environ.get("RAY_ADDRESS", "")
     if not address.endswith(":6381") or "://" in address or not address[:-5]:
-        raise ValueError("Submit through the application Ray Jobs server; its GCS must use port 6381")
+        raise ValueError(
+            "Submit through the application Ray Jobs server; its GCS must use port 6381"
+        )
     return address
 
 
@@ -85,7 +90,9 @@ def _imported_source_receipt(workbench) -> dict:
     }
     hashes = {name: sha256(Path(path)) for name, path in paths.items()}
     if hashes != source_hashes():
-        raise ValueError("Imported application/UDF modules differ from the Jobs working_dir")
+        raise ValueError(
+            "Imported application/UDF modules differ from the Jobs working_dir"
+        )
     return {"source_sha256": hashes, "imported_paths": paths}
 
 
@@ -199,8 +206,12 @@ class ClipModel:
             raise ValueError("Preprocessor and GPU actor imported different source")
         torch.cuda.synchronize()
         started = time.perf_counter()
-        batch = pyarrow.record_batch({"image_bytes": [row["image_bytes"] for row in shard["rows"]]})
-        vectors = self.workbench.udf_clip_embedding(batch, device="cuda:0", precision="float32")
+        batch = pyarrow.record_batch(
+            {"image_bytes": [row["image_bytes"] for row in shard["rows"]]}
+        )
+        vectors = self.workbench.udf_clip_embedding(
+            batch, device="cuda:0", precision="float32"
+        )
         torch.cuda.synchronize()
         self.calls += 1
         rows = []
@@ -210,7 +221,9 @@ class ClipModel:
             "rows": rows,
             "inference_seconds": time.perf_counter() - started,
             "preprocessing_seconds": shard["preprocess_seconds"],
-            "preprocessor": {key: shard[key] for key in ("source_sha256", "node_id", "pid")},
+            "preprocessor": {
+                key: shard[key] for key in ("source_sha256", "node_id", "pid")
+            },
         }
 
 
@@ -234,12 +247,16 @@ def _persist_vector_tables(output: Path, rows: list[dict], vectors):
     import pyarrow
     import pyarrow.parquet
 
-    table = pyarrow.table({
-        "record_id": [row["record_id"] for row in rows],
-        "input_sha256": [row["input_sha256"] for row in rows],
-        "processed_sha256": [row["processed_sha256"] for row in rows],
-        "vector": pyarrow.array(vectors.tolist(), type=pyarrow.list_(pyarrow.float32(), 512)),
-    })
+    table = pyarrow.table(
+        {
+            "record_id": [row["record_id"] for row in rows],
+            "input_sha256": [row["input_sha256"] for row in rows],
+            "processed_sha256": [row["processed_sha256"] for row in rows],
+            "vector": pyarrow.array(
+                vectors.tolist(), type=pyarrow.list_(pyarrow.float32(), 512)
+            ),
+        }
+    )
     pyarrow.parquet.write_table(table, output / "embeddings.parquet")
     database = lancedb.connect(str(output / "lance"))
     return database.create_table("embeddings", table)
@@ -269,7 +286,9 @@ def _preview_inputs(row: dict) -> tuple[bytes, bytes]:
     return original, row["image_bytes"]
 
 
-def _save_preview_image(content: bytes, destination: Path, preview, position: tuple) -> None:
+def _save_preview_image(
+    content: bytes, destination: Path, preview, position: tuple
+) -> None:
     """Decode RGB bytes before including them in the inspectable contact sheet."""
     from PIL import Image
 
@@ -361,7 +380,11 @@ def _parse_arguments(arguments: list[str] | None) -> argparse.Namespace:
         raise ValueError("records, actors and batch-size must be positive")
     output = Path(options.output_path)
     source_directory = Path(__file__).resolve().parent
-    if not output.is_absolute() or output.resolve().is_relative_to(source_directory) or output.exists():
+    if (
+        not output.is_absolute()
+        or output.resolve().is_relative_to(source_directory)
+        or output.exists()
+    ):
         raise ValueError("Use a new absolute output directory outside Ray working_dir")
     return options
 
@@ -369,13 +392,16 @@ def _parse_arguments(arguments: list[str] | None) -> argparse.Namespace:
 def _start_model_actors(options: argparse.Namespace, expected_sources: dict) -> list:
     """Create GPU actors from the imported module and verify their delivered source."""
     import ray
+
     # Module import makes each actor resolve its own working_dir, not __main__ bytes.
     from embed import ClipModel
 
     if ray.cluster_resources().get("GPU", 0) < options.actors:
         raise ValueError("The application cluster has fewer GPUs than requested actors")
     Path(options.output_path).mkdir(parents=True)
-    clip_actor = ray.remote(num_gpus=1, num_cpus=1, scheduling_strategy="SPREAD")(ClipModel)
+    clip_actor = ray.remote(num_gpus=1, num_cpus=1, scheduling_strategy="SPREAD")(
+        ClipModel
+    )
     models = [clip_actor.remote(options.model_path) for _ in range(options.actors)]
     receipts = ray.get([model.status.remote() for model in models])
     if any(receipt["source_sha256"] != expected_sources for receipt in receipts):
@@ -383,20 +409,97 @@ def _start_model_actors(options: argparse.Namespace, expected_sources: dict) -> 
     return models
 
 
-def _preprocess_batches(options: argparse.Namespace) -> list:
-    """Partition record IDs into ordinary Ray CPU tasks for GPU inference."""
+def _in_flight_batch_limit(actors: int) -> int:
+    """Scale the global queued-batch bound with CUDA actor capacity.
+
+    Args:
+        actors: Positive number of model actors receiving batches.
+    Returns:
+        Maximum number of end-to-end batches submitted at once.
+    Raises:
+        ValueError: The actor count is nonpositive.
+    """
+    if actors < 1:
+        raise ValueError("actors must be positive")
+    return actors * BATCHES_PER_ACTOR
+
+
+def _compact_completed_batch(result: dict) -> dict:
+    """Release processed image bytes after the preview sample range.
+
+    Args:
+        result: Completed inference batch returned by a CUDA actor.
+    Returns:
+        The same batch with non-preview image payloads removed.
+    Raises:
+        KeyError: A result row lacks its record identity.
+    """
+    for row in result["rows"]:
+        if row["record_id"] >= 8:
+            row.pop("image_bytes", None)
+    return result
+
+
+def _batch_record_ids(index: int, records: int, batch_size: int) -> list[int]:
+    """Build one requested batch without materializing the full input range.
+
+    Args:
+        index: Zero-based batch position.
+        records: Total number of records in the application run.
+        batch_size: Maximum records assigned to one batch.
+    Returns:
+        Consecutive record IDs for the selected batch.
+    Raises:
+        None.
+    """
+    start = index * batch_size
+    stop = min(start + batch_size, records)
+    return list(range(start, stop))
+
+
+def _run_inference_batches(
+    options: argparse.Namespace, models: list
+) -> tuple[list, float]:
+    """Apply backpressure across CPU preprocessing and CUDA inference.
+
+    Args:
+        options: Validated record, batch, and actor counts.
+        models: Initialized Ray CUDA actor handles.
+    Returns:
+        Ordered completed batches and the initial-window submission timestamp.
+    Raises:
+        RuntimeError: A Ray preprocessing or actor task fails.
+    """
     import ray
 
     prepare = ray.remote(num_cpus=1)(worker.preprocess_shard)
-    batches = []
-    for start in range(0, options.records, options.batch_size):
-        stop = min(start + options.batch_size, options.records)
-        record_ids = list(range(start, stop))
-        batches.append(prepare.remote(record_ids))
-    return batches
+    batch_count = (options.records + options.batch_size - 1) // options.batch_size
+    pending = {}
+    results = [None] * batch_count
+    next_batch = 0
+    limit = _in_flight_batch_limit(options.actors)
+    initial_window_submitted_at = 0.0
+    while next_batch < batch_count or pending:
+        while next_batch < batch_count and len(pending) < limit:
+            record_ids = _batch_record_ids(
+                next_batch, options.records, options.batch_size
+            )
+            shard = prepare.remote(record_ids)
+            model = models[next_batch % options.actors]
+            pending[model.infer.remote(shard)] = next_batch
+            next_batch += 1
+        if not initial_window_submitted_at:
+            initial_window_submitted_at = time.perf_counter()
+        ready, _ = ray.wait(list(pending), num_returns=1, fetch_local=False)
+        for reference in ready:
+            index = pending.pop(reference)
+            results[index] = _compact_completed_batch(ray.get(reference))
+    return results, initial_window_submitted_at
 
 
-def _write_execution_report(options, models, results, expected_sources, boundaries) -> dict:
+def _write_execution_report(
+    options, models, results, expected_sources, boundaries
+) -> dict:
     """Persist workload evidence using the same artifacts a reader inspects."""
     import ray
 
@@ -411,7 +514,9 @@ def _write_execution_report(options, models, results, expected_sources, boundari
         "cluster_connect_and_model_ready": ready - started,
         "preprocessing_submission": prepared - ready,
         "preprocessing_and_inference_wall": inferred - ready,
-        "preprocessing_task_sum": sum(result["preprocessing_seconds"] for result in results),
+        "preprocessing_task_sum": sum(
+            result["preprocessing_seconds"] for result in results
+        ),
         "inference_actor_sum": sum(result["inference_seconds"] for result in results),
         "aggregation_and_artifacts": time.perf_counter() - inferred,
         "application": time.perf_counter() - started,
@@ -423,12 +528,15 @@ def _write_execution_report(options, models, results, expected_sources, boundari
         "actors": actors,
         "ray_nodes": len({actor["node_id"] for actor in actors}),
         "preprocessors": [result["preprocessor"] for result in results],
+        "in_flight_batch_limit": _in_flight_batch_limit(options.actors),
         "timings_seconds": timings,
     }
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     write_hashes(output)
     print(f"Embedded {options.records} RGB images on {len(actors)} CUDA actor(s).")
-    print(f"Open {output}/preview.png; vectors: embeddings.parquet and lance/embeddings.lance")
+    print(
+        f"Open {output}/preview.png; vectors: embeddings.parquet and lance/embeddings.lance"
+    )
     print(json.dumps({"retrieval": artifacts["retrieval"], "timings_seconds": timings}))
     return report
 
@@ -454,13 +562,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         models = _start_model_actors(options, expected_sources)
         ready = time.perf_counter()
-        shards = _preprocess_batches(options)
-        prepared = time.perf_counter()
-        submissions = []
-        for index, shard in enumerate(shards):
-            model = models[index % options.actors]
-            submissions.append(model.infer.remote(shard))
-        results = ray.get(submissions)
+        results, prepared = _run_inference_batches(options, models)
         inferred = time.perf_counter()
         boundaries = (started, ready, prepared, inferred)
         _write_execution_report(options, models, results, expected_sources, boundaries)

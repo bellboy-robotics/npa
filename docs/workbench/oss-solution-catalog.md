@@ -1,5 +1,7 @@
 # OSS Physical AI Solution Candidates
 
+[Workbench docs](README.md)
+
 This catalog tracks open-source Physical AI projects that are being onboarded as
 Workbench registry candidates through BYOF, including entries subsequently
 promoted to native tools or public images as noted below. Promotion requires the pushed registry image
@@ -16,10 +18,14 @@ unique and must be tested with its own upstream-named capabilities.
 
 | Candidate | Pinned source | Primary (hard-gate) capability | Artifact | NPA workflow |
 | --- | --- | --- | --- | --- |
+| LIBERO | `Lifelong-Robot-Learning/LIBERO` `8f1084e3…` | `libero_spatial_bc_rnn_train_reload_heldout` | Canonical `libero-smoke.json` + checkpoint digest/reload evidence (checkpoint remains local and is never uploaded) | `byof-libero.yaml` |
 | ManiSkill | `mani-skill/ManiSkill` `v3.0.1` | `gymnasium_pickcube_registration` | `maniskill_pickcube_step.json` | `byof-maniskill.yaml` |
 | MuJoCo Playground | `google-deepmind/mujoco_playground` `v0.2.0` | `mjx_cartpole_step` (+ CheetahRun) | `mujoco_playground_cartpole_step.json` | `byof-mujoco-playground.yaml` |
+| Gymnasium-Robotics | `Farama-Foundation/Gymnasium-Robotics` `4d1ebecb…` | `HandManipulateBlockRotateXYZ_ContinuousTouchSensors-v1` | `gymnasium-robotics-smoke.json` | `byof-gymnasium-robotics.yaml` |
 | RoboCasa | `robocasa/robocasa` `v1.0` | `kitchen_task_registration` | `robocasa_kitchen_env_reset.json` | `byof-robocasa.yaml` |
+| Enactic OpenArm (**accepted public image; Isaac runtime fetch**) | `enactic/openarm_mujoco` `2.2.0` + `enactic/openarm_isaac_lab` `bad82e…` | `openarm_mujoco_bimanual_rollout` + `Isaac-Reach-OpenArm-v0` | MuJoCo/Isaac trajectories and RSL-RL checkpoint | `openarm-simulators.yaml` |
 | OpenPI | `Physical-Intelligence/openpi` `15a9616a…` | connected direct / cross-pod serve / LoRA optimizer smoke / held-out evaluation, plus the upstream full-DROID fine-tuning recipe | `openpi_pi05_droid_jointpos_polaris_inference.json` plus connected mode reports; full-DROID emits preparation and 100-update qualification RRDs, then immutable run-derived progress RRDs/manifests through the 100,000-update checkpoint | `byof-openpi.yaml` → `openpi-pi05-four-mode.yaml`; trusted public-image build → `openpi-pi05-full-droid-finetune.yaml` |
+| flex-pi (**accepted public image**) | `geyan21/flex-pi` `20c1b2b…` | strict released-checkpoint action-only inference | `actions.json` + input/result provenance | `flex-pi-b200-inference.yaml` / `flex-pi-rtxpro-inference.yaml` |
 | DROID policy learning | `droid-dataset/droid_policy_learning` `9a29c832…` | `rlds_config_generator_contract` | `droid_rlds_config_generator.json` | `byof-droid-policy-learning.yaml` |
 | Open Dreamer (world model, **2-GPU min**) | `next-state/open-dreamer` `2b10640` | `dreamer4_tokenizer_train_two_gpu` | `open_dreamer_world_model_2gpu.json` | `byof-open-dreamer.yaml` |
 | Alibaba Wan 2.2 TI2V-5B | `Wan-Video/Wan2.2` `42bf4cf…` | `wan2.2_ti2v_5b_text_to_video` | capability JSON + runtime inventory + MP4 | `byof-wan2.2.yaml` |
@@ -30,21 +36,27 @@ unique and must be tested with its own upstream-named capabilities.
 
 | Solution | Capability | Live status | Run / evidence |
 | --- | --- | --- | --- |
+| LIBERO | `libero_spatial_bc_rnn_train_reload_heldout` | **qualification pending; payload-free public-development staging permitted; not released** | Requires complete-byte and anonymous-pull proof followed by one STRICT-bound B200 run of the exact candidate digest: eight upstream BC-RNN/Adam steps on the official LIBERO-Spatial demonstration, checkpoint reload, and full trajectory-disjoint held-out evaluation |
 | ManiSkill | `gymnasium_pickcube_registration` | **accepted** | `defcap-maniskill-20260708-230227` (81 `-v1` envs) |
 | ManiSkill | `pickcube_cpu_step` / `pickcube_parallel_envs` / `pickcube_gpu_rgb_render` | **accepted** | `defcap11-maniskill-20260709-043408` (sapien 3.0.3 on CUDA Ubuntu22.04/py3.10; Blackwell render OK) |
 | MuJoCo Playground | `mjx_cartpole_step` | **accepted** | `defcap8-mujoco-playground-20260709-024455` (+ prior `…-005745`) |
 | MuJoCo Playground | `mjx_cheetah_run_step` | **accepted** | Same runs; CheetahRun reward≈0.0019 |
 | MuJoCo Playground | `train_jax_ppo_cartpole_smoke` | **accepted** | `defcap9-mujoco-playground-20260709-034059` (`brax_ppo_train_api`, jax 0.8.0) |
+| Gymnasium-Robotics | `HandManipulateBlockRotateXYZ_ContinuousTouchSensors-v1` | **historical private proof; neutral development build release-quarantined** | The accepted `c308945a` result remains bound to its private digest. The redesigned source has a payload-free development-build path but no accepted release or public image proof; any new private receipt remains owner-only. |
 | RoboCasa | `kitchen_task_registration` | **accepted** | `defcap8-robocasa-20260709-024455` (+ prior `…-011138`) |
 | RoboCasa | `download_kitchen_assets_lw` | **accepted** | `defcap17-robocasa-20260709-060243` (IIFAN fixtures+objects; restored git accessories) |
 | RoboCasa | `kitchen_egl_env_reset` | **accepted** | `defcap17-robocasa-20260709-060243` (post-download subprocess; 58 lightwheel cats; obs dict) |
 | RoboCasa | `kitchen_random_rollout` | **accepted** | `defcap20-robocasa-20260710-032142` (`run_random_rollouts` + mp4 `22150` bytes; `gymnasium==0.29.1` + `env.sim` bind) |
+| Enactic OpenArm | `openarm_mujoco_bimanual_rollout` | **accepted** | exact public development digest: 500 real `mj_step` calls, finite joint/command/energy trace, and fully decoded 100-frame H.264 render |
+| Enactic OpenArm | `Isaac-Reach-OpenArm-v0` rollout | **accepted** | same digest on RTX PRO 6000: 64 environments × 100 real PhysX/CUDA steps with finite rewards and policy observations |
+| Enactic OpenArm | `Isaac-Reach-OpenArm-v0` RSL-RL training | **accepted** | same digest: upstream trainer completed one iteration and emitted an independently validated serialized Torch checkpoint |
 | OpenPI | `pi05_droid_jointpos_polaris_checkpoint_download` | **accepted** | Canonical isolated B200 gate: image build/push/digest verification, then 12,434,530,837 runtime-only GCS bytes with 27-object generation-manifest provenance; exact scoped `NPA_OPENPI_ACCEPT_GEMMA_TERMS=YES` is runtime-only |
 | OpenPI | `pi05_droid_jointpos_polaris_direct_infer` | **accepted** | Same digest-pinned B200 `sm_100` gate; deterministic Franka input produced finite `float64[15,8]` joint-position targets |
 | OpenPI | `pi05_droid_jointpos_polaris_served_infer` | **accepted builder regression** | Same gate; upstream WebSocket health + same-pod client round trip produced finite `float64[15,8]` |
 | OpenPI | `pi05_droid_jointpos_polaris_cross_pod_serve` | **accepted** | Isolated single-B200 connected gate: private ClusterIP, ready digest-pinned server Deployment, and a distinct CPU client pod completed two finite `float64[15,8]` requests; exact service cleanup passed |
 | OpenPI | `pi05_droid_jointpos_polaris_lora_optimizer_smoke` | **accepted** | Same connected gate: upstream pi0.5 LoRA forward/backward/AdamW step, finite loss, changed trainable-state hash, and independently reloadable private Orbax checkpoint |
 | OpenPI | `pi05_droid_jointpos_polaris_heldout_evaluate` | **accepted** | Same connected gate: exact trained-checkpoint reload, two samples excluded from the four-sample training split, finite upstream loss and action MAE/MSE, and finite `float64[15,8]` trajectory |
+| flex-pi | `robotwin_action_only_infer` | **accepted** | Current r2 digest independently on one B200 and one RTX PRO 6000: complete checkpoint-state load, compiled four-step inference, finite `float32[32,14]` actions, and three read-back-verified JSON artifacts per target. The historical `0.1.0-cu128` B200 capacity run completed 24 independent one-GPU replicas; that scaling record does not qualify r2. |
 | DROID | `rlds_config_generator_contract` | **accepted** | `defcap8-droid-policy-learning-20260709-024455` (+ prior) |
 | DROID | `droid_100_download` | **accepted** | Same run (`https_meta` `dataset_info.json`) |
 | DROID | `droid_100_config_gen` | **accepted** | Same run (`EXP_NAMES` droid_100 wiring) |
@@ -63,6 +75,50 @@ unique and must be tested with its own upstream-named capabilities.
 
 ## Native Capabilities Per Container
 
+### LIBERO
+
+Pinned runtime source: `Lifelong-Robot-Learning/LIBERO`
+`8f1084e3132a39270c3a13ebe37270a43ece2a01` (MIT). The narrow admission
+candidate runtime-fetches one official `libero_spatial` demonstration from
+`yifengzhu-hf/LIBERO-datasets@f13aa24a3da8c43c7225569f28c562979fa0e35a`
+and verifies its 508,779,600 bytes against SHA-256
+`ff6f26121653c77280eb40a38773a74141c11a8509f3466058cb56dd2cc60ead`.
+The upstream LIBERO publisher declares its datasets CC BY 4.0; the mirror card's
+conflicting Apache-2.0 tag is not used to broaden rights.
+Task conditioning runtime-fetches the independently pinned Apache-2.0
+`google-bert/bert-base-cased@cd5ef92a9fb2f889e972770a36d4ed042daf221e`
+files and runs the pinned upstream LIBERO `AutoTokenizer`/`AutoModel`
+`pooler_output` path. Neither those model bytes nor the demonstration is baked.
+The public-neutral candidate also bakes no LIBERO, robomimic, MuJoCo, PyTorch,
+CUDA/NVIDIA runtime, task/render asset, populated cache, checkpoint, credential,
+or output byte. It remains absent from the release manifest and public image
+table, and unqualified until byte, provenance, anonymous-pull, and live
+acceptance. Historical private r15 bytes are old-head evidence only.
+The trusted public workflow permits payload-free development publication after
+local image-byte/security gates. The local scan records the complete ordered
+layer and flattened-rootfs inventory; the pushed digest must match it and pass
+anonymous pull. Runtime qualification and customer acknowledgement remain
+separate requirements for execution and supported release promotion.
+
+| Capability | Status | Upstream basis |
+| --- | --- | --- |
+| `libero_official_demo_sha256` | qualification pending | Exact official HDF5 mirror revision, byte size, SHA-256, 50 trajectories, 5,068 samples, task language, BDDL, and initial-state hashes |
+| `libero_upstream_bert_task_conditioning` | qualification pending | Exact Apache-2.0 BERT revision and file hashes, pinned LIBERO embedding-source hash, and finite 768-dimensional upstream `pooler_output` |
+| `libero_trajectory_disjoint_heldout_split` | qualification pending | Deterministic 40-train / 10-held-out trajectory split; no trajectory may appear in both partitions |
+| `libero_spatial_bc_rnn_train_reload_heldout` | hard gate, qualification pending | Upstream BERT task conditioning plus `Sequential.observe` + `BCRNNPolicy` + the upstream-configured `torch.optim.Adam` for exactly eight nonzero optimizer steps, strict upstream checkpoint reload, held-out NLL, and finite reloaded 7-DoF action predictions on exactly one B200 (`sm_100`) |
+
+An authorized runtime sparse-fetch retains the hash-bound BDDL and initial
+states but never fetches the unused render-asset tree. The official
+demonstration is fetched into a manifest-addressed cache outside the artifact
+directory and is never baked or uploaded. A missing, denied, expired, or
+mismatched customer/run authorization refuses before cache or network mutation;
+credentials establish upstream access only, and runtime fetch is delivery, not
+permission. Acceptance
+requires the Pod-observed immutable image digest in `libero-smoke.json`; imports,
+BDDL parsing, dataset inventory, or zero-step training do not pass. Rendered
+closed-loop sweeps, all 130 tasks, lifelong-algorithm comparison, and physical
+robots remain deferred. See [`byof-libero.md`](byof-libero.md).
+
 ### ManiSkill
 
 | Capability | Status | Upstream basis |
@@ -80,6 +136,28 @@ unique and must be tested with its own upstream-named capabilities.
 | `mjx_cheetah_run_step` | accepted (live) | Additional registered env beyond Cartpole |
 | `train_jax_ppo_cartpole_smoke` | accepted (live) | brax PPO train API reduced timesteps (jax&lt;0.8.1) |
 
+### Gymnasium-Robotics
+
+| Capability | Status | Upstream basis |
+| --- | --- | --- |
+| `registered_shadow_hand_environment` | historical private proof only | Upstream `HandManipulateBlockRotateXYZ_ContinuousTouchSensors-v1` registration at exact source commit |
+| `mujoco_physics_steps` / `mujoco_contacts` | historical private proof only | 120 upstream `env.step` calls, 2,400 MuJoCo substeps, finite rewards, contacts, and quantitative state/orientation change |
+| `continuous_touch_sensor_response` | historical private proof only | Official 92-site Shadow Hand `sensordata` vector with nonzero live readings |
+| `egl_rgb_rendering` | historical private proof only | Actual 240×320 RGB frames, distinct hashes, measured rate, and loaded NVIDIA EGL library |
+| `rtx_pro_6000_blackwell_execution` | historical private proof only | One strict RTX PRO 6000 Blackwell (`sm_120`) plus private pushed/pod-observed immutable digest equality |
+
+This remains a minimal BYOF candidate. It has no model, external dataset,
+gated asset, terms acceptance, RL training claim, expert score, other
+environment-family claim, or physical-robot transfer claim. See
+[`byof-gymnasium-robotics.md`](byof-gymnasium-robotics.md).
+The neutral zero-Shadow-payload bootstrap has a development-build path but is
+release-quarantined. An
+owner-only reference build supplied the scanner's exact config and ordered
+20-DiffID anchors, but did not complete the product scan, SBOM, push, or
+immutable-digest gates and left no accepted artifact. Pinned source, Shadow
+assets, MuJoCo/Python runtime, and populated caches are runtime-only; historical
+private evidence does not transfer to redesigned image or executable bytes.
+
 ### RoboCasa
 
 | Capability | Status | Upstream basis |
@@ -95,6 +173,42 @@ unique and must be tested with its own upstream-named capabilities.
 > (`byof-robocasa.yaml`) is preserved for compatibility, but the native tool is
 > the maintained surface. See `skills/tools/robocasa/SKILL.md` and
 > `workflows/testing/robocasa-smoke.yaml`.
+
+### Enactic OpenArm
+
+OpenArm is split upstream by capability. NPA pins `enactic/openarm_mujoco`
+release 2.2.0 (`a8c979629f2591ad035d99d338ce114969e6cddc`) and the untagged
+`enactic/openarm_isaac_lab` repository at
+`bad82e23716e6941c2de78ccb978f57c78b37734`. Both simulator repositories and
+their included MJCF/USD robot assets are Apache-2.0. The separate hardware/CAD
+repository is not an image input and no rights for it are inferred.
+
+| Capability | Status | Upstream basis |
+| --- | --- | --- |
+| `openarm_mujoco_bimanual_rollout` | accepted (live) | `openarm_mujoco.v2.openarm_demo_xml`, `JointResolver`, 500 real `mj_step` calls, finite joint/command/energy NPZ, and 100-frame H.264 render |
+| `Isaac-Reach-OpenArm-v0` rollout | accepted (live) | upstream registered Isaac Lab environment, 64 vectorized environments × 100 real PhysX/CUDA steps, finite reward and policy-observation trace on RTX PRO 6000 |
+| `Isaac-Reach-OpenArm-v0` RSL-RL training | accepted (live) | pinned upstream `scripts/reinforcement_learning/rsl_rl/train.py`, one completed iteration, and independently validated serialized Torch checkpoint |
+
+The public `npa-openarm` image contains the Apache-2.0 OpenArm sources and
+MuJoCo closure, but no Isaac Sim, Isaac Lab, or Omniverse Kit bytes. Isaac is
+hash-pinned and fetched into the operator's runtime cache through the shared
+acceptance/refusal bootstrap. See [OpenArm](openarm.md) and
+`workflows/testing/openarm-simulators.yaml`.
+
+### flex-pi
+
+| Capability | Status | Upstream basis / NPA evidence |
+| --- | --- | --- |
+| `robotwin_action_only_infer` | accepted (live) | Released 6B RoboTwin checkpoint; three RGB cameras, 14D state, and language input produced finite 32-step bimanual action chunks independently on B200 and RTX PRO 6000 |
+| `strict_checkpoint_state` | accepted (live) | Maintained fail-closed loader rejected missing/unexpected MoT keys and required proprio, DINO, and pointmap state before the success marker |
+| `action_artifact_provenance` | accepted (live) | Source, checkpoint, data, runtime-asset, input, action, and image identities persisted in three hash-verified JSON artifacts |
+| `blackwell_compiled_infer` | accepted (live) | Current r2 digest passed real compiled inference independently on one B200 and one RTX PRO 6000. Historical `0.1.0-cu128` paired benchmarks measured 2.645× and 2.278× median speedup; those values apply only to the old digest |
+
+> **Promoted to a first-class workbench tool.** flex-pi is available through
+> `npa workbench flex-pi`, `npa.sdk.workbench.flex_pi`, the
+> `workbench.flex_pi.infer` toolRef, and maintained B200 and RTX PRO 6000 workflows.
+> The public image contains no weights, observation media, or populated cache.
+> See `skills/tools/flex-pi/SKILL.md` and `docs/workbench/flex-pi.md`.
 
 ### OpenPI
 
@@ -253,12 +367,14 @@ package/image tags:
 | Version | Status | Notes |
 | --- | --- | --- |
 | `0.5.1` | default | Accepted CUDA 13 timestamped image pin in `lerobot_version_manifest.json`; plain `0.5.1` is historical |
-| `0.6.0` | additional package support | Requires a validated operator-built image for container execution; no accepted public tag/digest; lean extras + `env_eval_freq` |
+| `0.6.0` | validated additional package support | Accepted immutable `0.6.0-d6-extras-20260912` image and digest; lean diffusion + SmolVLA extras; real DiffusionPolicy construction and Blackwell validation passed on B200; `env_eval_freq` |
 
 Select the package with `--lerobot-version`; serverless training accepts a
 custom container through `train --image`, while VM deployment installs the
-package. The 2026-09-05 anonymous audit returned `404 MANIFEST_UNKNOWN` for
-the official `npa-lerobot:0.6.0` tag; it is outside the public release plan.
+package. The failed 2026-09-05 anonymous lookup was resolved by the 2026-09-12
+exact-digest publication. The immutable resolver tag and compatibility
+`0.6.0` alias now resolve to the same accepted bytes; the optional version
+remains separate from the default public release row.
 Manifest:
 `npa/src/npa/deploy/lerobot_version_manifest.json`. Upstream:
 https://huggingface.co/blog/lerobot-release-v060
@@ -295,3 +411,25 @@ npa/.venv/bin/npa workbench workflow plan-spec \
 The registry-ready gate is not satisfied until the live run pulls the pushed
 image, executes the smoke command, and writes `npa_byof_summary.json`, smoke
 logs, and the named capability artifact to object storage.
+
+
+## GPU video BYOF workflows
+
+These Tier 1 BYOF recipes use immutable Diffusers source and model revisions. They do not claim action-conditioned simulation, training, or real-time serving. See [build and run instructions](video-generation-byof.md).
+
+| Model | Native API | Capability | Artifact | Workflow | Status |
+| --- | --- | --- | --- | --- | --- |
+| mochi-1 | `MochiPipeline` on CUDA | `mochi-1_text_to_video` | `mochi_1_text_to_video.json` + `video.mp4` | `byof-mochi-1.yaml` | public GHCR image; B200 inference verified (2026-09-16) |
+| cogvideox-2b | `CogVideoXPipeline` on CUDA | `cogvideox-2b_text_to_video` | `cogvideox_2b_text_to_video.json` + `video.mp4` | `byof-cogvideox-2b.yaml` | public GHCR image; B200 inference verified (2026-09-16) |
+| wan2.1-14b | `WanPipeline` on CUDA | `wan2.1-14b_text_to_video` | `wan2_1_14b_text_to_video.json` + `video.mp4` | `byof-wan2.1-14b.yaml` | public GHCR image; B200 inference verified (2026-09-16) |
+
+
+### LingBot World v1 camera workflow
+
+`byof-lingbot-world.yaml` exercises `lingbot_world_camera_conditioned_video` using pinned upstream `generate.py`, FSDP, and Ulysses on four B200 GPUs. It emits `lingbot_world_camera_conditioned_video.json`, per-rank execution evidence, authored camera controls, the source image, and a fully decoded MP4. Exact public GHCR image inference verified on B200 on 2026-09-16. Camera trajectories and approximate intrinsics are authored, not measured. This v1 recipe does not claim robot action input, training, real-time performance, or support for the separate World Infinity successor.
+
+- `byof-depth-anything-v2.yaml`: `relative_depth_video` emits `depth_anything_v2_relative_depth.json`, raw prediction arrays and a fully decoded GPU-derived video. Exact public GHCR image inference verified on B200 on 2026-09-16. Model checkpoints are immutable runtime fetches; video inputs require a complete SHA256. No metric-depth, ground-truth-mask, or robot-success claim.
+
+- `byof-sam2.1.yaml`: `prompted_video_mask_propagation` emits `sam2_1_video_mask_propagation.json`, raw prediction arrays and a fully decoded GPU-derived video. Exact public GHCR image inference verified on B200 on 2026-09-16. Model checkpoints are immutable runtime fetches; video inputs require a complete SHA256. No metric-depth, ground-truth-mask, or robot-success claim.
+
+Qualification above used the exact public GHCR images pulled by GPU workers, native capability execution, successful worker summaries, complete artifact hash verification and independent full video decode. The recipes default to the accepted `npa-diffusers`, `npa-lingbot-world` and `npa-sam2` digests; they are Tier 1 workflows, without standalone serving APIs. [Public capability evidence](validation/studio-public-models-20260916.json) records the bounded results. Concrete infrastructure records remain private.

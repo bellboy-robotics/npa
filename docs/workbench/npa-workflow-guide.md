@@ -1,70 +1,109 @@
 # NPA workflow guide (`apiVersion: npa.workflow/v0.0.1`)
 
-Declarative state-machine specs for workbench tool pipelines. One format is consumed
-three ways: YAML file, CLI, and Python SDK.
+[Workbench docs](README.md) · [Workflow catalog](../../workflows/README.md)
+
+A workflow is a graph of tool calls, S3 artifacts, and transitions. NPA validates
+and plans the YAML, then uses SkyPilot to execute it. This page covers the command
+sequence and format; each workload guide supplies its inputs and resource needs.
 
 ## Quick start
 
+From the clone root, inspect a generation workflow locally:
+
 ```bash
-# Validate structure and closed toolRef / predicate registries
-npa workbench workflow validate-spec workflows/testing/vlm-eval-single.yaml
-
-# Expand loops/branches in the demo-only Sim2Real DSL fixture (dry-run)
-npa workbench workflow plan-spec workflows/main/sim2real.yaml \
-  --run-id demo --assume-decision loop_back
-
-# Plan + optional scheduler hints + S3 run manifest
-npa workbench workflow run-spec workflows/testing/vlm-eval-single.yaml \
-  --plan-only --scheduler-plan --persist-state --json
-
-# Submit an npa.workflow spec
-npa workbench workflow submit workflows/testing/vlm-eval-single.yaml \
-  --run-id demo --registry <your-registry>/<namespace>
-
-# Plan only (no submit) — inspect planned steps
-# Token Factory (and other no-image tools) need NPA_SRC_S3_URI or --image
-NPA_SRC_S3_URI=s3://<bucket>/npa-src/npa \
-  npa workbench workflow submit workflows/testing/token-factory-caption.yaml \
-  --plan-only --run-id demo
+workflow_spec=workflows/testing/cosmos3-generate.yaml
+npa workbench workflow validate-spec "$workflow_spec"
+npa workbench workflow plan-spec "$workflow_spec" --run-id preview --json
 ```
 
-A successful submit prints the resolved run ID in text mode and returns it as
-the top-level `run_id` in `--output-format json`. If the spec configures an S3
-`bucket`, NPA also writes a run manifest under its resolved prefix. List those
-runs later with the established durable-run command:
+These commands launch no workload. The plan still contains the example bucket.
+For execution, complete [Workbench setup](getting-started.md) and the
+[Cosmos 3 prerequisites](cosmos3-generate.md#workflow), then set your actual target:
+
+```bash
+project_alias='<your-project-alias>'
+cluster_name='<your-npa-cluster-name>'
+bucket_name='<your-bucket>'
+run_id="$(npa workbench workflow prepare-run "$workflow_spec" --project "$project_alias")"
+
+npa workbench workflow plan-spec "$workflow_spec" \
+  --run-id "$run_id" --var "bucket=$bucket_name"
+npa workbench workflow preflight-images "$workflow_spec" \
+  --project "$project_alias" --infra "k8s/$cluster_name" \
+  --var "bucket=$bucket_name" --json
+```
+
+Review the resolved GPU shape, image, and output prefix. Image preflight may
+create and delete a temporary probe pod. Then run the workload:
+
+```bash
+npa workbench workflow submit "$workflow_spec" \
+  --project "$project_alias" --infra "k8s/$cluster_name" \
+  --run-id "$run_id" --var "bucket=$bucket_name" --runtime \
+  --secret-env HF_TOKEN \
+  --secret-env AWS_ACCESS_KEY_ID --secret-env AWS_SECRET_ACCESS_KEY
+```
+
+`--runtime` supervises execution to a terminal state. The default generation
+requires gated guardrail access through `HF_TOKEN`. Secrets resolve from the
+private environment or selected project's credential store; pass names only.
+Public images need no registry login. Use `--registry` only for custom images.
+
+Inspect the same run from another shell or after submission returns:
+
+```bash
+npa workbench workflow status "$run_id" --project "$project_alias"
+npa workbench workflow logs "$run_id" --project "$project_alias"
+npa workbench workflow artifacts "$run_id" --project "$project_alias" --json
+```
+
+Open the generated media and `generate.json`; a successful job alone does not
+prove output quality. Keep the run ID for [recovery](../run-lifecycle.md#restart-safety)
+and follow [teardown](../teardown.md) when finished with owned resources.
+
+### Source staging and run IDs
+
+`prepare-run` reserves a new identity. `submit` prints the resolved ID in text
+mode or as `run_id` with `--output-format json`. Find durable runs with:
 
 ```bash
 npa workbench workflow list \
-  --s3-bucket <bucket> --workflow-s3-prefix <parent-prefix> --json
+  --s3-bucket "<bucket>" --workflow-s3-prefix "<parent-prefix>" --json
 ```
 
-Author and submit `npa.workflow/v0.0.1` specs from the
-[`workflow catalog`](../../workflows/README.md). `workflows/main/` contains only
-`sim2real.yaml` and `paidf-cosmos3.yaml`; all other catalog specs, including new
-workflows, belong in `workflows/testing/`.
+When tasks need source, submission automatically stages a content-addressed
+archive and persists its identity. A manually staged `NPA_SRC_S3_URI` or explicit
+image remains an override; it is not a prerequisite for the ordinary path.
+Resume the exact run using the command NPA prints, or `--resume-run <id>` with
+the original specification and target. See [run identity](../run-lifecycle.md#run-identity).
 
-**No-image tools** (Token Factory specs): set
-`NPA_SRC_S3_URI=s3://bucket/prefix/npa` so the job can sync and install `npa`,
-or pass `--image` to a workbench image that already includes it. `--plan-only`
-does not mint or print live registry tokens.
+### Choose another spec
+
+Browse the [workflow catalog](../../workflows/README.md). `workflows/main/`
+contains `sim2real.yaml`, `paidf-cosmos3.yaml`, and `nurec-reconstruct.yaml`;
+other catalog workflows live in `workflows/testing/`. A directory name does not
+establish a workflow's validation scope; read its guide.
 
 Reference specs (all pytest-guarded):
 
 | File | Shows |
 | --- | --- |
 | `vlm-eval-single.yaml` | Single `toolRef`, terminal state |
-| `token-factory-caption.yaml` | Zero-GPU Token Factory caption |
+| `token-factory-caption.yaml` | Hosted Token Factory captioning |
 | `tokenfactory-rollout-judge.yaml` | Serial two-tool chain with `inputs`/`outputs` |
 | `sim2real.yaml` | Canonical compositional 14-stage Sim2Real runtime; requires immutable component images and task-aligned S3 inputs for execution |
 | `bdd100k-pipeline.yaml` | AV failure-mode pipeline — ingest → backfill → train → eval |
 | `av-night-scene-hardening.yaml` | AV night-scene hardening — fan-out into two per-view detector train→eval branches |
 | `cosmos-synth-fanout-curation.yaml` | Fan-out Cosmos Transfer 2.5 synthetic-data shards → Voxel51 (FiftyOne) curation |
 | `tokenfactory-cosmos-gate.yaml` | Creative reason → augment → VLM gate loop |
-| `sonic-locomotion-finetuning.yaml` | Retarget → SONIC train → MJLab eval |
+| `sonic-locomotion-finetuning.yaml` | Retarget → SONIC train → export → native SONIC eval |
 | `groot-1-7-finetune.yaml` | GR00T N1.7 operational pipeline: deterministic real-data split, parameterized distributed optimizer smoke, immutable checkpoint, aligned offline inference, honest learning outcome, native RRD/MCAP, S3 publication, and deployed-agent viewer verification |
 | `mjlab-eval.yaml` / `retargeting.yaml` / `sonic-*.yaml` / `cosmos3-reason.yaml` | Single-tool workbench specs |
 
 ## Document shape
+
+This excerpt illustrates the schema. Use a complete spec from the catalog for
+execution; each `toolRef` also requires its own configuration and inputs.
 
 ```yaml
 apiVersion: npa.workflow/v0.0.1
@@ -72,6 +111,8 @@ kind: Workflow
 
 metadata:
   name: my-workflow
+  # Set for workflows whose live branches depend on decision artifacts.
+  executionMode: runtime
 
 config:            # parameters; referenced by tokens
   bucket: my-bucket
@@ -97,6 +138,14 @@ states:
 ```
 
 ## State mechanics
+
+`metadata.executionMode: runtime` makes the generic submit command select the
+runtime orchestrator automatically. Use it when live execution must re-read a
+decision artifact to exit a loop or choose a transition. Read-only planning still
+flattens the selected `--assume-decision` path. An explicit `--no-runtime` is
+rejected for these workflows because a one-shot plan cannot honor their real
+data-dependent control flow. These workflows also reject `--assume-decision`
+for execution; use it only for offline planning previews.
 
 | Field | Purpose |
 | --- | --- |
@@ -141,8 +190,8 @@ states:
 
 ## Tool catalog
 
-See `docs/workbench/npa-workflow-tool-catalog.md` and
-`npa/src/npa/orchestration/npa_workflow/catalog.py`. Add new tools in Python, not by
+See the [toolRef catalog](npa-workflow-tool-catalog.md) and its
+[source](../../npa/src/npa/orchestration/npa_workflow/catalog.py). Add new tools in Python, not by
 inventing YAML fields.
 
 ## Runtime features (v0.0.1+)
@@ -162,15 +211,15 @@ and launches it. Use `--plan-only` to inspect the plan without launching.
 
 ### Runtime orchestrator (`--runtime`)
 
-The default submit path is one-shot: it renders the flattened serial plan (loops
-unrolled with `--assume-decision`) and launches it. That path is unchanged.
+Without `metadata.executionMode: runtime`, the default submit path is one-shot:
+it renders the flattened serial plan (loops unrolled with `--assume-decision`)
+and launches it. Runtime-required workflows select the driver automatically.
 
 `--runtime` adds a driver that executes the graph wave by wave:
 
 ```bash
-npa workbench workflow submit <spec.yaml> --run-id <id> --runtime \
-  [--resume] [--poll-seconds 30] [--max-wait-seconds 3600] \
-  [--retries 1] [--max-concurrency 2] [--no-cancel-on-timeout]
+npa workbench workflow submit "<spec.yaml>" --run-id "<id>" --runtime \
+  --project "<alias>" --infra "k8s/<cluster>" --var bucket="<bucket>"
 ```
 
 | Capability | Behaviour |
@@ -204,6 +253,13 @@ independently recomputed from the current spec, source selection, and digest pin
 declared S3 output evidence
 is authoritative, and any live prior attempt is cancelled by exact provider ID
 with terminal verification.
+
+For runtime workflows, GPU capacity is checked against each rendered wave at the
+shared SDK submit boundary. Resuming an existing job does not require spare GPU
+capacity or record a new capacity check. Supervisor evidence retains the wave,
+attempt and observation time of a successful submission; adopting a job without
+that local evidence leaves capacity unknown. Every new or retried submission
+must pass the SDK checks again.
 
 Submission binds those checks to one effective execution target. The selected
 NPA project must have saved project, tenant and region identities. The provider's
@@ -266,7 +322,12 @@ queue, and persistent user identity. Its endpoint and process ownership are
 recorded before startup and verified again on reconnect. A conflicting endpoint,
 foreign listener, or changed executing identity blocks submission. Preserve this
 directory when reconnecting to existing jobs; an unrelated local SkyPilot API
-is never adopted or stopped as part of that isolated runtime.
+is never adopted or stopped as part of that isolated runtime. This isolates
+SkyPilot state and process ownership, not the selected provider files: the
+isolated home contains live symlinks to the operator's Nebius configuration and
+kubeconfig, so reads and writes through those paths reach the source files. Use
+dedicated task-owned provider configuration when credential helpers or other
+submit-time clients must not update shared operator files.
 
 The actual resolved output directories, file-parent prefixes, run-ledger prefix,
 and any source-staging destination receive a unique write/readback probe using
@@ -318,6 +379,57 @@ Machine-readable evidence distinguishes:
   outputs. Infrastructure retry is disabled.
 - `unknown`: missing, conflicting, or ambiguous backend identity/evidence.
   Relaunch and fuzzy cancellation are blocked to prevent duplicates.
+
+A credential-exec RPC stream closure during controller file synchronization can
+leave a reserved Pending row before the task payload arrives. The default SDK
+retains the typed transport cause and refuses to adopt that row as running work.
+The runtime may replace it only after checking every declared output is absent,
+cancelling the exact ID, rereading its actual terminal outcome, and refreshing
+the shared image/access/GPU preflight against unchanged task bytes. It checks
+output absence again after cancellation and preflight. A success racing with
+cancellation is reused only when all declared outputs validate. Unknown rows,
+auth/configuration failures, output uncertainty, and unverified cancellation
+block replacement.
+
+The supervisor records a content-addressed parent-to-successor reservation under
+the existing infrastructure recovery policy. A restarted driver consumes the
+same identity and count; it cannot invent another reservation or fall back to
+attempt 1. An observable successor is adopted exactly. An absent successor can
+be submitted only when durable intent proves the provider POST was not begun;
+unknown POST outcomes remain blocked. Explicit driver recovery is recorded as
+`recovery_resumed`, separately from payload replay. Recovery preparation retains
+the failed attempt's original local files and writes its refreshed preflight
+files into a separate owned directory.
+
+Status keeps the workflow lifecycle separate from the observed managed jobs.
+When every recorded job has succeeded but the workflow has not recorded
+completion, it retains the durable `RUNNING`/`SUBMITTED` lifecycle instead of
+reporting a failed live query or inferring workflow success. The JSON
+`workflow_lifecycle` includes the original durable status source and update time,
+`completion_recorded`, and `driver_liveness: unknown`. Polling an old completed
+job does not create a workflow heartbeat or establish driver liveness. `--watch`
+continues through inter-wave and finalization handoffs; check the original submit
+driver before deciding to resume. Durable failure/cancellation and conflicting
+outcomes remain visible; conflicting terminal evidence and live query errors
+exit nonzero, and `--cached` remains
+non-authoritative. Completion and declared artifact validation are separate
+requirements.
+
+Job aggregates and task rows come from separate queue snapshots. A successful
+task row or durable stage record can therefore coexist with a recognized
+nonterminal job observation. Status retains the incomplete workflow lifecycle
+and `--watch` continues. Each stage's `raw_job_scheduler_state` and
+`raw_task_scheduler_state` preserve the distinct observations; neither a poll nor
+stage success proves workflow completion. Missing, unknown, malformed, or failed
+queries still stop live verification. Contradictory terminal job/task outcomes
+remain `UNKNOWN` with explicit stage conflicts; a failed parallel job can
+legitimately include successful member tasks.
+
+The interpreter manifest records successful completion as `completed`. Status
+normalizes that manifest marker to `SUCCEEDED`; `workflow_lifecycle.manifest_evidence`
+retains its raw status, original update time, and authoritative source. The runtime
+ledger continues to use `succeeded`. Conflicting terminal outcomes and failed
+latest attempts still prevent a successful status.
 
 `npa workbench workflow status <run-id> --json` includes the latest supervisor
 classification, recovery action, exact attempt identity, output/checkpoint

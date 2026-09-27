@@ -9,6 +9,61 @@ from __future__ import annotations
 
 # Each value is an ordered list of concrete checks the golden eval runs.
 GOLDEN_EVAL_CAPABILITIES: dict[str, list[str]] = {
+    "antioch": [
+        "FastAPI service authentication boundary",
+        "CPU-only system-info contract",
+        "proprietary antioch-sim distribution absent",
+    ],
+    "diffusers": [
+        "hash-locked CUDA runtime and pinned CogVideoX-2B checkpoint load",
+        "native GPU text-to-video pipeline generates and fully decodes an MP4",
+        "output hashes and runtime provenance accompany the capability artifact",
+        "separate workflow qualification covers Mochi, Wan and relative depth",
+    ],
+    "lingbot-world": [
+        "pinned upstream model and operator-supplied source image load",
+        "native camera-conditioned generation runs on four CUDA ranks",
+        "each rank records positive attention and all-to-all execution",
+        "generated MP4 fully decodes with camera and checkpoint provenance",
+    ],
+    "sam3": [
+        "exact SAM 3.1 checkpoint access and pinned source/runtime fetch",
+        "text-prompted masks propagate across the real source video on CUDA",
+        "nonempty masks and decoded overlay match the source frame count",
+        "source, checkpoint, compatibility-patch and output hashes are retained",
+    ],
+    "sam2": [
+        "pinned SAM 2.1 Small checkpoint loads on CUDA",
+        "native video predictor propagates a first-frame box through the input",
+        "raw predicted masks and a fully decoded overlay MP4 are retained",
+        "unchanged source pixels are checked after video encoding",
+    ],
+    "gymnasium-robotics": [
+        "future exact candidate runs the registered Shadow Dexterous Hand environment",
+        "120 MuJoCo steps and 2,400 substeps prove contact, touch, and orientation change",
+        "EGL produces distinct RGB frames on one RTX PRO 6000 Blackwell",
+        "neutral bootstrap is unbuilt and none of these checks are current-image evidence",
+    ],
+    "libero": [
+        "quarantined neutral bootstrap requires an explicit immutable "
+        "acceptance-candidate digest",
+        "runtime fetch verifies the pinned official MIT LIBERO source and "
+        "CC BY 4.0 demonstration hashes before use",
+        "headless one-B200 smoke requires real upstream BC-RNN Adam steps "
+        "and strict checkpoint reload",
+        "trajectory-disjoint held-out loss and actions plus exact image and "
+        "GPU evidence are required in libero-smoke.json",
+    ],
+    "ncore": [
+        "pinned official NCore V4 reader imports in the NPA interpreter on CPU",
+        "native COLMAP converter CLI schema loads with patched trueprice/pycolmap",
+        "source inventory hashes match; no functional capture validation claimed",
+    ],
+    "mjlab": [
+        "native MJLab PPO training writes a loadable RSL-RL checkpoint",
+        "real complete-episode evaluation produces finite measured returns",
+        "native ONNX export passes the ONNX checker",
+    ],
     "curobo": [
         "real NVIDIA cuRobo V2 Franka pose optimization on CUDA",
         "finite interpolated joint trajectories and actual FK tool path",
@@ -43,6 +98,12 @@ GOLDEN_EVAL_CAPABILITIES: dict[str, list[str]] = {
         "real ego-trajectory inference produces projected trajectory JSON",
         "calibrated-camera trajectory PNG and immutable result provenance are written",
     ],
+    "flex-pi": [
+        "pinned upstream 6B flex-pi checkpoint and required encoders load on CUDA",
+        "three-camera public RoboTwin observation and 14D state are hash-verified",
+        "real four-step action-only inference produces a finite 32x14 action chunk",
+        "latency, peak GPU memory, model/input hashes, and RTX PRO 6000 identity are recorded",
+    ],
     "lerobot": [
         "LeRobot package version pin",
         "50-step PushT training run",
@@ -69,6 +130,13 @@ GOLDEN_EVAL_CAPABILITIES: dict[str, list[str]] = {
         "headless runtime launch",
         "manipulation env create",
         "env step loop",
+    ],
+    "isaac-arena": [
+        "pinned official Isaac Lab-Arena 0.3.0 policy_runner starts through runtime-fetched Isaac",
+        "hash-pinned Apache-2.0 GR1 open-microwave replay drives nonzero upstream actions on CUDA",
+        "episode JSONL and the upstream static HTML evaluation report are non-empty",
+        "RTX qualification requires current-run task success and simulator-ground-truth progress bound to denoised coherent visual motion; historical r2 visual evidence is rejected",
+        "NPA result manifest binds artifact hashes, task metrics, input hash, and video to the exact run",
     ],
     "leisaac": [
         "real LeIsaac-SO101-PickOrange-v0 environment starts",
@@ -154,9 +222,11 @@ GOLDEN_EVAL_CAPABILITIES: dict[str, list[str]] = {
         "motion-lib validate_motion_lib on synthetic payload",
     ],
     "fiftyone": [
-        "fiftyone import + version pin",
-        "CLI --help",
-        "app config (DB-free env smoke)",
+        "FiftyOne installed version pin",
+        "create a real dataset using bundled MongoDB",
+        "query the dataset and verify sample fields",
+        "CPU Brain uniqueness, similarity and PCA visualization",
+        "launch the App on loopback, read its response and stop it",
     ],
     "lancedb": [
         "FastAPI server start",
@@ -177,6 +247,14 @@ GOLDEN_EVAL_CAPABILITIES: dict[str, list[str]] = {
         "kitchen asset availability check",
         "headless EGL environment reset",
         "random rollout with video artifact",
+    ],
+    "openarm": [
+        "pinned upstream OpenArm v2 bimanual MJCF loads through openarm_mujoco",
+        "500 real MuJoCo position-control steps advance finite robot state",
+        "compressed joint, actuator-command, and velocity-energy trajectory artifact",
+        "exact-digest RTX gate launches runtime-fetched Isaac Sim/Isaac Lab",
+        "upstream Isaac-Reach-OpenArm-v0 vectorized environment steps on CUDA",
+        "upstream RSL-RL trainer writes a real checkpoint",
     ],
     "wan2-2": [
         "pinned Wan source import with OSS CPU dependency base",
