@@ -1,5 +1,7 @@
 # Agent-operated Workbench workflows
 
+[Workbench docs](README.md)
+
 An automation agent can operate any Workbench workflow through NPA without
 knowing how NPA schedules or executes it. The caller owns its reasoning system
 and provider configuration. Workflow operations do not select, configure, or
@@ -25,6 +27,23 @@ The API accepts YAML text and returns typed validation and plan results. A calle
 using subprocesses must invoke only the fixed `npa ...` operations below. It
 must not invoke an execution backend, a cluster client, a terminal multiplexer,
 or an arbitrary shell command.
+
+### Agent UI execution
+
+The **Prepare run** control in the Agent UI is intentionally two-step. The first
+request validates the exact YAML and produces its scheduler plan without
+launching a workload. The UI then presents a single-use confirmation bound to
+the YAML digest, run ID, project, and Kubernetes target. Confirming it invokes
+`npa workbench workflow submit --runtime` on the agent VM and waits for the
+durable runtime result. If infrastructure is absent, the UI asks separately to
+confirm provisioning first, then asks again before workflow execution. The
+artifact-backed Stages panel is the run's evidence surface; it does not infer a
+successful stage merely from the presence of an artifact.
+
+An agent-authored template must make every input artifact concrete. When chat
+creates an input (such as a prompt JSONL), the YAML includes a real preparation
+stage that writes the declared durable URI before a consuming tool stage starts;
+an assumed or VM-local input path is not a runnable handoff.
 
 <a id="read-only-preparation"></a>
 
@@ -80,6 +99,12 @@ npa workbench workflow status <run-id> --project <project> --no-watch --json
 npa workbench workflow logs <run-id> --project <project> --stage <stage> --cached --max-output-chars 32768 --json
 npa workbench workflow artifacts <run-id> --project <project> --json
 ```
+
+Omit `--cached` to read live logs from the recorded managed job. Logs for a
+single-stage serial wave remain available if the driver stopped before its first
+task observation. A provider response that the requested task does not exist is
+reported as `VERIFICATION_UNAVAILABLE` with exit code 2; it is not verified stage
+output.
 
 Diagnose a failed run from the status result first, then request the named failed
 stage's bounded log tail and artifact inventory. Preserve the run ID for resume;

@@ -34,6 +34,102 @@
 format: npa_golden_evals_v1
 
 containers:
+  gymnasium-robotics:
+    image: npa-gymnasium-robotics
+    internal: true
+    default_tag: neutral-unbuilt
+    dockerfile: npa/docker/workbench/gymnasium-robotics/Dockerfile
+    physical_ai:
+      useful: true
+      role: >-
+        Neutral development-candidate bootstrap for a runtime-cached genuine Shadow
+        Dexterous Hand manipulation, touch, contacts, and EGL hard gate.
+    safety:
+      runs_as: ubuntu
+      base_image: ubuntu:noble-20260905@sha256:a61567bd31828687156d735ea8eb01ba4e37636e225dd6a48ba94136a70d9d61
+      network: runtime fetch only after a complete immutable lock
+      external_fetch:
+        - exact Gymnasium-Robotics source and hashed Python wheels into an operator-owned cache
+      notes: >-
+        An owner-only reference build supplied the exact config and ordered
+        20-DiffID scanner anchors, but did not complete the product scan, SBOM,
+        push, or immutable-digest gates and left no accepted artifact. Intended
+        candidate layers contain only neutral bootstrap bytes; upstream source,
+        Shadow assets, MuJoCo/Python workload, populated cache, model, dataset,
+        vendor runtime, credential, checkpoint, and output bytes are excluded.
+        Fetching later is delivery, not rights acceptance.
+    golden_eval:
+      kind: container-smoke
+      command: bash /usr/local/bin/npa-gymnasium-entrypoint run-smoke
+      gpu: required
+      timeout_seconds: 1800
+      status: needs-image-update
+      artifact: ${NPA_SMOKE_OUTPUT_DIR}/gymnasium-robotics-smoke.json
+
+  libero:
+    image: npa-libero
+    dockerfile: npa/docker/workbench/libero/Dockerfile
+    physical_ai:
+      useful: true
+      role: >-
+        Trains and reloads LIBERO's upstream BC-RNN policy on one official
+        LIBERO-Spatial demonstration with genuine held-out evaluation.
+    safety:
+      runs_as: ubuntu
+      base_image: python:3.10-slim-bookworm@sha256:999137905e8718de681744822ccd965e1950e1baba089035060418e05e1d7496
+      network: >-
+        Customer-authorized immutable runtime fetch from pinned GitHub, PyPI,
+        PyTorch, and Hugging Face endpoints plus operator S3 output
+      external_fetch:
+        - github-libero-runtime
+        - pypi-runtime
+        - pytorch-runtime
+        - huggingface-libero-demo-runtime
+        - huggingface-bert-runtime
+        - s3-runtime
+      notes: >-
+        The public candidate is an unbuilt, quarantined neutral bootstrap. It
+        contains no LIBERO, GPU runtime, model, demonstration, task/render
+        asset, cache, checkpoint, credential, or output bytes. A short-lived
+        customer/run authorization for the exact named terms and manifest plus
+        an explicit immutable qualified-candidate digest are mandatory. HF/NGC
+        credentials prove access only. The eval remains blocked until byte, anonymous
+        pull, and exact-digest one-B200 evidence is accepted.
+    golden_eval:
+      kind: container-smoke
+      command: sh /opt/npa/libero/smoke.sh
+      artifact: /workspace/byof-runs/libero-smoke.json
+      serverless_gpu: b200
+      gpu: required
+      timeout_seconds: 7200
+      status: needs-image-update
+  antioch:
+    image: npa-antioch
+    dockerfile: npa/docker/workbench/antioch/Dockerfile
+    physical_ai:
+      useful: true
+      role: >-
+        CPU-only control plane for durable Antioch simulation submission,
+        reconciliation, cancellation, collection, offline policy-data export,
+        and a same-pod tunnel/relay to a cluster-local policy Service.
+    safety:
+      runs_as: "10001"
+      base_image: python:3.12-slim-bookworm
+      network: authenticated FastAPI control plane on :8789
+      external_fetch: ["operator-authorized digest-pinned Antioch CLI at runtime"]
+      notes: >-
+        Contains no simulator engine, proprietary Antioch wheel, credentials, or
+        customer data. The smoke proves the token boundary, system-info route,
+        CPU-only classification, and absence of the proprietary distribution;
+        authenticated vendor health is covered by the separate live integration.
+    golden_eval:
+      kind: container-smoke
+      module: npa.smoke.test_antioch_functional
+      command: python -m npa.smoke.test_antioch_functional
+      gpu: none
+      timeout_seconds: 60
+      status: ready
+
   openpi:
     image: npa-openpi
     dockerfile: npa/docker/workbench/openpi/Dockerfile
@@ -95,6 +191,29 @@ containers:
       gpu: required
       timeout_seconds: 300
       status: blocked-on-upstream
+
+  ncore:
+    image: npa-ncore
+    dockerfile: npa/docker/workbench/ncore/Dockerfile
+    physical_ai:
+      useful: true
+      role: CPU COLMAP source-capture ingestion into NCore V4 for downstream reconstruction.
+    safety:
+      runs_as: ubuntu
+      base_image: python:3.12.12-slim-bookworm
+      network: source fetched at build; packaging check fetches locked Python dependencies on a cold runtime
+      external_fetch: [github-ncore-build, github-trueprice-pycolmap-build, pypi-build]
+      notes: >-
+        Apache-2.0 converter and reader, MIT trueprice reader, no model/data/NRE
+        payload. Import and CLI-schema checks only. A real complete capture
+        conversion and independent decode are required for capability acceptance.
+        Explicit development image required until image acceptance.
+    golden_eval:
+      kind: build-import
+      command: /opt/venv/bin/python /opt/ncore/bin/verify-packaging.py
+      gpu: none
+      timeout_seconds: unlimited
+      status: needs-image-update
 
   content-agents:
     image: npa-content-agents
@@ -307,6 +426,47 @@ containers:
       gpu: required
       timeout_seconds: 1800
       status: gpu-gated
+
+  isaac-arena:
+    image: npa-isaac-arena
+    dockerfile: npa/docker/workbench/isaac-arena/Dockerfile
+    physical_ai:
+      useful: true
+      role: >-
+        Isaac Lab-Arena completed-episode policy evaluation with raw episode
+        journals, an upstream HTML report, optional viewport video, and an NPA
+        artifact/hash manifest.
+    safety:
+      runs_as: ubuntu
+      base_image: ghcr.io/nebius/nebius-physical-ai/npa-isaac-lab@sha256:e321e8631c7e318b5012dad210d9cd1001b7dc833cbff0369e420c5c12657ab6
+      network: >-
+        Runtime-fetched Isaac, the pinned public replay, authorized Lightwheel
+        registry assets, optional exact-driver Ubuntu graphics package, and S3.
+      external_fetch:
+        - "pypi.nvidia.com (operator EULA)"
+        - "GitHub (pinned Apache-2.0 Arena replay)"
+        - "Lightwheel registry (operator authorization)"
+        - "Ubuntu signed archive (exact-driver graphics package when needed)"
+        - s3
+      notes: >-
+        Bakes the pinned Apache-2.0 Arena source, Apache-2.0 Lightwheel SDK,
+        and hash-locked open-source evaluation dependencies. Isaac Sim/Lab,
+        registry assets, graphics fallback packages, and operator policy inputs
+        remain runtime-only. Captured upstream logs are
+        produced without cloud/model credentials in the subprocess environment.
+        The golden smoke downloads the pinned upstream Apache-2.0 GR1
+        open-microwave replay fixture, verifies its Git LFS SHA-256, and requires
+        upstream task success plus denoised viewport motion bound to the
+        current-run simulator door trace. The historical r2 image's grain-based
+        visual qualification is rejected; the corrected candidate needs fresh
+        image and workload qualification before this entry becomes ready.
+    golden_eval:
+      kind: container-smoke
+      command: bash /opt/npa/docker/workbench/isaac-arena/smoke_functional.sh
+      serverless_gpu: rtx6000
+      gpu: required
+      timeout_seconds: 1800
+      status: needs-image-update
 
   leisaac:
     image: npa-leisaac
@@ -666,7 +826,7 @@ containers:
       command: python /opt/npa/docker/workbench/cosmos-evaluator/smoke_functional.py
       serverless_gpu: h100
       gpu: none
-      timeout_seconds: 600
+      timeout_seconds: unlimited
       status: ready
 
   sonic:
@@ -771,18 +931,18 @@ containers:
     safety:
       runs_as: ubuntu
       base_image: python:3.11-slim-trixie
-      network: FiftyOne app on :5151
+      network: FiftyOne app on 127.0.0.1:5151; authenticated SSH or Kubernetes port-forward
       external_fetch: [pypi, huggingface, s3]
       notes: >-
-        CPU-only; app should be exposed via controlled public-access path, not
-        bound to 0.0.0.0 without auth. The image ships standalone smoke scripts
-        (it does not install the npa package). The golden eval is the env smoke
-        (import + version + CLI + app config); the functional smoke is a heavier
-        integration test that needs a working MongoDB, which the slim base does
-        not provision.
+        CPU-only; keep App access private through loopback and an authenticated
+        SSH or Kubernetes port-forward. The image ships standalone smoke scripts
+        and bundled MongoDB, without installing the npa package. The functional
+        golden eval checks version, dataset creation and query, real Brain
+        curation, and App launch. Source installation and publication security
+        gates require separate exact-image evidence.
     golden_eval:
       kind: container-smoke
-      command: python /opt/npa/docker/workbench/fiftyone/smoke_env.py
+      command: python /opt/npa/docker/workbench/fiftyone/smoke_functional.py
       serverless_gpu: h100
       gpu: none
       timeout_seconds: 300
@@ -873,6 +1033,125 @@ containers:
       timeout_seconds: 300
       status: ready
 
+  diffusers:
+    image: npa-diffusers
+    dockerfile: npa/docker/workbench/diffusers/Dockerfile
+    physical_ai:
+      useful: true
+      role: Mochi 1, CogVideoX-2B and Wan 2.1 video generation; relative-depth perception.
+    safety:
+      runs_as: ubuntu
+      base_image: npa-wan2-2 (accepted public digest pinned)
+      network: runtime-only CUDA and operator-authorized Hugging Face checkpoints
+      external_fetch: [pytorch-cu130-after-operator-acceptance, huggingface]
+      notes: >-
+        Source-only public job runtime. Health is a packaging check; the golden
+        command runs a real GPU capability and decodes the output. Camera and
+        segmentation require operator-supplied input mounts. Separate model
+        workflow runs qualify every advertised capability.
+    golden_eval:
+      kind: container-smoke
+      command: bash /usr/local/bin/model-runtime golden --model cogvideox-2b --output-path /tmp/npa-golden
+      gpu: required
+      timeout_seconds: unlimited
+      status: gpu-gated
+
+  lingbot-world:
+    image: npa-lingbot-world
+    dockerfile: npa/docker/workbench/lingbot-world/Dockerfile
+    physical_ai:
+      useful: true
+      role: Native camera-conditioned continuation with four-rank FSDP and Ulysses.
+    safety:
+      runs_as: ubuntu
+      base_image: npa-wan2-2 (accepted public digest pinned)
+      network: runtime-only CUDA and operator-authorized Hugging Face checkpoints
+      external_fetch: [pytorch-cu130-after-operator-acceptance, huggingface]
+      notes: >-
+        Source-only public job runtime. Health is a packaging check; the golden
+        command runs a real GPU capability and decodes the output. Camera and
+        segmentation require operator-supplied input mounts. Separate model
+        workflow runs qualify every advertised capability.
+    golden_eval:
+      kind: container-smoke
+      command: bash /usr/local/bin/model-runtime golden --model lingbot-world --input-path /inputs/image.png --output-path /tmp/npa-golden
+      gpu: required
+      timeout_seconds: unlimited
+      status: gpu-gated
+
+  sam3:
+    image: npa-sam3
+    dockerfile: npa/docker/workbench/sam3/Dockerfile
+    physical_ai:
+      useful: true
+      role: SAM 3.1 text-prompted video segmentation with per-frame object masks.
+    safety:
+      runs_as: ubuntu
+      base_image: python:3.12-slim-bookworm (digest pinned)
+      network: Operator-only pinned source, model and CUDA runtime fetch
+      external_fetch: [github, huggingface, pytorch-cu130]
+      notes: >-
+        Neutral bootstrap; no SAM source or weights are baked. HF_TOKEN and
+        operator-provided source video required. GPU acceptance is deferred.
+    golden_eval:
+      kind: container-smoke
+      command: python /opt/npa/sam3/runtime.py segment --input-path /inputs/video.mp4 --prompt person --output-path /tmp/npa-sam31-golden
+      gpu: required
+      timeout_seconds: unlimited
+      status: gpu-gated
+
+  sam2:
+    image: npa-sam2
+    dockerfile: npa/docker/workbench/sam2/Dockerfile
+    physical_ai:
+      useful: true
+      role: Native prompted mask propagation through a source video.
+    safety:
+      runs_as: ubuntu
+      base_image: npa-wan2-2 (accepted public digest pinned)
+      network: runtime-only CUDA and operator-authorized Hugging Face checkpoints
+      external_fetch: [pytorch-cu130-after-operator-acceptance, huggingface]
+      notes: >-
+        Source-only public job runtime. Health is a packaging check; the golden
+        command runs a real GPU capability and decodes the output. Camera and
+        segmentation require operator-supplied input mounts. Separate model
+        workflow runs qualify every advertised capability.
+    golden_eval:
+      kind: container-smoke
+      command: bash /usr/local/bin/model-runtime golden --model sam2.1 --input-path /inputs/video.mp4 --box 240 100 700 500 --output-path /tmp/npa-golden
+      gpu: required
+      timeout_seconds: unlimited
+      status: gpu-gated
+  openarm:
+    image: npa-openarm
+    dockerfile: npa/docker/workbench/openarm/Dockerfile
+    physical_ai:
+      useful: true
+      role: >-
+        Enactic OpenArm v2 bimanual MuJoCo simulation and OpenArm reinforcement
+        learning environments in NVIDIA Isaac Sim/Isaac Lab.
+    safety:
+      runs_as: ubuntu
+      base_image: nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 (digest pinned)
+      network: FastAPI service on :8792; operator S3; first-use Isaac runtime fetch
+      external_fetch: [pypi-nvidia-isaac-runtime, github-isaaclab-source, s3]
+      notes: >-
+        Bakes exact Apache-2.0 OpenArm MuJoCo and Isaac sources/assets plus a
+        hash-locked OSS closure. No Isaac Sim, Isaac Lab, Omniverse Kit,
+        credentials, accepted terms, caches, or operator data are baked. The
+        golden eval performs a real 500-step OpenArm v2 bimanual MuJoCo control
+        rollout and validates its trajectory; exact-digest RTX qualification
+        additionally runs the upstream OpenArm Isaac reach rollout and trainer.
+    golden_eval:
+      kind: container-smoke
+      module: npa.smoke.test_openarm_functional
+      command: python -m npa.smoke.test_openarm_functional
+      artifact: /tmp/npa-openarm-golden/golden_eval.json
+      serverless_gpu: rtx6000
+      gpu: optional
+      timeout_seconds: 600
+      status: ready
+
   wan2-2:
     image: npa-wan2-2
     dockerfile: npa/docker/workbench/wan2-2/Dockerfile
@@ -926,6 +1205,27 @@ containers:
       timeout_seconds: 120
       status: ready
 
+  mjlab:
+    image: npa-mjlab
+    dockerfile: npa/docker/workbench/mjlab/Dockerfile
+    physical_ai:
+      useful: true
+      role: GPU robot learning, measured policy evaluation and ONNX deployment artifacts.
+    safety:
+      runs_as: ubuntu
+      base_image: python:3.12-slim-bookworm (digest pinned); CUDA provided by locked wheels
+      network: S3 artifacts only; no model download required for velocity or cartpole tasks
+      external_fetch: [s3]
+      notes: No checkpoints, motion datasets, credentials or populated caches baked.
+    golden_eval:
+      kind: container-smoke
+      module: npa.smoke.test_mjlab_functional
+      command: python -m npa.smoke.test_mjlab_functional
+      serverless_gpu: h100
+      gpu: required
+      timeout_seconds: 600
+      status: gpu-gated
+
   curobo:
     image: npa-curobo
     dockerfile: npa/docker/workbench/curobo/Dockerfile
@@ -972,6 +1272,32 @@ containers:
       gpu: required
       timeout_seconds: 3600
       status: gpu-gated
+
+  flex-pi:
+    image: npa-flex-pi
+    dockerfile: npa/docker/workbench/flex-pi/Dockerfile
+    physical_ai:
+      useful: true
+      role: >-
+        Flex-pi 6B multi-stream world-action policy predicts a 32-step bimanual
+        action chunk from three cameras, robot state, and language instruction.
+    safety:
+      runs_as: ubuntu
+      base_image: pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel (digest pinned)
+      network: runtime-only Hugging Face/ModelScope fetch and S3 artifact upload
+      external_fetch: [huggingface-public-model, huggingface-authorized-public-input, modelscope, s3]
+      notes: >-
+        Ships pinned MIT source/runtime, but no weights, observation media,
+        credentials, or populated cache. The input dataset card has no declared
+        license and is fetched only for the operator's authorized run.
+    golden_eval:
+      kind: container-smoke
+      module: npa.smoke.test_flex_pi_functional
+      command: python -m npa.smoke.test_flex_pi_functional
+      serverless_gpu: rtx6000
+      gpu: required
+      timeout_seconds: unlimited
+      status: ready
 
   sim2real-control:
     image: npa-sim2real-control

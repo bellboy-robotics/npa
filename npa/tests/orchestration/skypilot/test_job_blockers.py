@@ -146,9 +146,7 @@ def test_pod_initializing_is_progress_not_an_init_container_failure() -> None:
     # A main container waiting with reason PodInitializing means init containers
     # completed and the main container is starting -- normal progress, not the
     # fatal INIT_CONTAINER_FAILED a substring match used to manufacture.
-    runner = _runner(
-        _pods(_waiting_pod("sky-abc-worker-0", "PodInitializing"))
-    )
+    runner = _runner(_pods(_waiting_pod("sky-abc-worker-0", "PodInitializing")))
 
     report = inspect_job_blockers(cluster_name="sky-abc", runner=runner)
 
@@ -259,14 +257,13 @@ def test_no_cluster_and_no_job_id_is_an_error() -> None:
     assert "no cluster name or job id" in report.error
 
 
-def test_the_lookup_is_not_limited_to_the_context_default_namespace() -> None:
-    # SkyPilot's namespace is configurable, so a default-namespace-only query
-    # would silently report a healthy job.
+def test_the_lookup_uses_the_context_namespace() -> None:
+    # Querying every namespace would require unrelated teams' Pod permissions.
     runner = _runner(_pods())
 
     inspect_job_blockers(job_id="333", runner=runner)
 
-    assert "--all-namespaces" in _pod_call(runner)
+    assert "--all-namespaces" not in _pod_call(runner)
 
 
 def test_an_explicit_namespace_is_honored() -> None:
@@ -388,7 +385,7 @@ def test_a_pod_level_reason_still_wins_over_the_node_check() -> None:
             "Unschedulable",
             "0/3 nodes: insufficient nvidia.com/gpu",
             "scheduler",
-            "ACCELERATOR_MISMATCH",
+            "CAPACITY_OR_QUOTA",
         ),
         (
             "Unschedulable",
@@ -442,3 +439,31 @@ def test_kubernetes_diagnostic_failures_are_typed_and_sanitized(
     assert report.error_code == code
     assert "synthetic-secret" not in report.error
     assert report.observed_at
+
+
+@pytest.mark.parametrize("reason", ["Unschedulable", "FailedScheduling"])
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "0/4 nodes: 1 Insufficient cpu, 2 Insufficient nvidia.com/gpu, "
+            "2 node(s) did not match Pod's node affinity/selector",
+            "CAPACITY_OR_QUOTA",
+        ),
+        ("Insufficient nvidia.com/gpu", "CAPACITY_OR_QUOTA"),
+        ("Insufficient cpu", "CAPACITY_OR_QUOTA"),
+        ("GPU capacity temporarily unavailable", "CAPACITY_OR_QUOTA"),
+        ("GPU quota exceeded", "CAPACITY_OR_QUOTA"),
+        ("no nodes match requested GPU accelerator", "ACCELERATOR_MISMATCH"),
+        ("GPU accelerator label did not match", "ACCELERATOR_MISMATCH"),
+        ("persistentvolumeclaim has volume node affinity conflict", "STORAGE_PENDING"),
+        ("no nodes are available", "CAPACITY_OR_QUOTA"),
+        ("node selector did not match", "UNSCHEDULABLE"),
+    ],
+)
+def test_scheduler_shortage_is_distinct_from_accelerator_mismatch(
+    reason: str,
+    message: str,
+    expected: str,
+) -> None:
+    assert classify_pending_reason(reason, message, source="scheduler") == expected

@@ -16,11 +16,11 @@ from npa.workflows.sim2real.workflow_io import (
 )
 
 
-def _aggregate_usage(
-    results: list[dict[str, Any]], *, model: str
-) -> dict[str, Any]:
+def _aggregate_usage(results: list[dict[str, Any]], *, model: str) -> dict[str, Any]:
     requests = [dict(item.get("request") or {}) for item in results]
-    priced = bool(requests) and all(item.get("cost_usd") is not None for item in requests)
+    priced = bool(requests) and all(
+        item.get("cost_usd") is not None for item in requests
+    )
     return {
         "provider": "nebius",
         "backend": "token_factory",
@@ -32,9 +32,13 @@ def _aggregate_usage(
         "aggregate_latency_seconds": round(
             sum(float(item.get("latency_seconds") or 0.0) for item in requests), 6
         ),
-        "per_request_latency_seconds": [item.get("latency_seconds") for item in requests],
+        "per_request_latency_seconds": [
+            item.get("latency_seconds") for item in requests
+        ],
         "retries": sum(int(item.get("retries") or 0) for item in requests),
-        "request_ids": [item.get("request_id") for item in requests if item.get("request_id")],
+        "request_ids": [
+            item.get("request_id") for item in requests if item.get("request_id")
+        ],
         "cost_usd": (
             round(sum(float(item["cost_usd"]) for item in requests), 8)
             if priced
@@ -67,13 +71,15 @@ def run(args: argparse.Namespace) -> None:
         manifest = json.loads(manifest_path.read_text())
         observations = list(manifest.get("camera_observations") or [])
         frames = [manifest_path.parent / str(name) for name in observations]
-        frames = [path for path in frames if path.is_file()]
-        if not frames:
-            frames = sorted(manifest_path.parent.glob("camera-*.png"))
+        if not frames or any(not path.is_file() for path in frames):
+            raise RuntimeError("Stage 8 requires every declared primary rollout frame")
         results.append(
             run_token_factory_rollout_vlm(
                 model_id=args.reason_model,
                 image_paths=frames,
+                frame_metadata=(manifest.get("camera_frame_metadata") or {}).get(
+                    "primary"
+                ),
                 actions=list(manifest.get("actions") or []),
                 task_description=task_description_from_manifest(manifest),
                 rollout_id=str(manifest.get("rollout_id") or manifest_path.parent.name),

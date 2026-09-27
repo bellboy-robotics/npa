@@ -1,5 +1,7 @@
 # Workbench Getting Started
 
+[Workbench docs](README.md)
+
 Complete the [platform quickstart](../quickstart.md) through credential setup,
 then use this page to prepare a GPU workflow on Nebius Kubernetes. Run commands
 from the repository root with your environment activated. Keep project settings
@@ -8,7 +10,13 @@ and credentials in the existing NPA stores; no second credential file is needed.
 Direct [Token Factory](token-factory.md) inference uses the hosted API. Its local
 CLI/SDK calls do not require the Kubernetes setup below.
 
+> **Realistic total for a first workload: 1–3 hours.** The long poles are
+> cluster provisioning, the SkyPilot venv build, and GPU image pulls —
+> all one-time costs. Repeat runs skip most of this page.
+
 ## Choose the workload first
+
+> **Time:** ~5 min — reading; pick before provisioning anything.
 
 | Workload | Compute and setup |
 | --- | --- |
@@ -16,11 +24,13 @@ CLI/SDK calls do not require the Kubernetes setup below.
 | [Compositional Sim2Real](guides/sim2real-workflow.md) | The canonical 14-stage spec requests RTX PRO 6000 GPUs, CPU capacity, and an Isaac runtime cache. Follow its full runbook. |
 | [Isaac Lab BYOF](cookbooks/byof-isaac-lab/README.md) | A custom container and RT-core GPU capacity, such as L40S or RTX PRO 6000, as specified by the cookbook. |
 
-H100/H200 do not provide the RT cores needed for Isaac rendering. Read the
+H100/H200 and B200/B300 do not provide the RT cores needed for Isaac rendering. Read the
 chosen workflow's resource profiles before provisioning: model memory, CPU,
 driver, and GPU requirements differ between tools.
 
 ## Install Workbench Tools
+
+> **Time:** ~5–15 min first run — longer if kubectl, Terraform, or Docker still need installing.
 
 In addition to the [base install](../install.md), Kubernetes runs need `kubectl`
 and the isolated SkyPilot runtime installed below. Managed infrastructure also
@@ -38,6 +48,8 @@ Gate: the CLI and required host tools work, and the intended project and storage
 appear in the configuration. The client-version check does not test cluster access.
 
 ## Confirm Platform Credentials
+
+> **Time:** ~5 min once the platform quickstart is done.
 
 Use the selected workload's access checks before provisioning GPUs. For the
 default Cosmos 3 generation workflow:
@@ -62,6 +74,8 @@ reconcile the bucket and endpoint in NPA configuration and environment overrides
 
 ## Plan the workflow
 
+> **Time:** ~2 min — runs locally, no cloud wait.
+
 The following example prepares Cosmos 3 text-to-image generation. Replace the
 placeholder values with your existing project alias and bucket. Keep private
 values outside committed YAML.
@@ -82,6 +96,8 @@ These commands do not launch the model or verify live capacity.
 
 ## Verify Kubernetes Access
 
+> **Time:** ~5 min against an existing cluster; **10–20+ min** when provisioning a new managed cluster.
+
 For a new NPA-managed cluster, use the selected workload's sizing instructions
 before running the additive provisioning command. Preview the exact plan:
 
@@ -89,6 +105,10 @@ before running the additive provisioning command. Preview the exact plan:
 npa provision-if-absent --project "$project_alias" \
   --cluster-name "$cluster_name" --dry-run --output-format json
 ```
+
+Inspect `status` and `preflight.decision` in the JSON. A dry run can exit zero
+while reporting `blocked`; resolve its `preflight.reasons` before applying.
+Reserved GPU availability does not provide boot-disk quota.
 
 When its GPU/CPU topology matches the workload, run the same command without
 `--dry-run`. See [Kubernetes setup](kubernetes.md) for operational details.
@@ -117,6 +137,8 @@ for deployed services.
 
 ## Bootstrap SkyPilot
 
+> **Time:** ~5–10 min first run — builds the isolated SkyPilot venv.
+
 ```bash
 npa skypilot bootstrap
 export NPA_SKYPILOT_BIN="$(npa skypilot status --bin-path)"
@@ -136,19 +158,24 @@ for their resource requests.
 
 ## Verify the Image Channel
 
+> **Time:** ~5–15 min — multi-GB GPU image pulls dominate; the probe pod itself is fast.
+
 ```bash
 npa workbench workflow preflight-images "$workflow_spec" \
   --project "$project_alias" --infra "k8s/$cluster_name" \
   --var "bucket=$bucket_name" --json
 ```
 
-Gate: every selected image passes. Supported NPA images pull anonymously from
+Gate: every selected image passes. This check may create and delete a temporary
+probe pod in the selected cluster. Supported NPA images pull anonymously from
 `ghcr.io/nebius/nebius-physical-ai`. `NPA_REGISTRY` and saved registry settings
 do not repoint those defaults. Use a complete image reference or explicit
 workflow `--registry` only for intentional custom images, with exact-host
 credentials if that registry is private.
 
 ## Run and inspect the result
+
+> **Time:** workload-dependent — the first real GPU run, not setup.
 
 Continue with the chosen workload's submission instructions:
 

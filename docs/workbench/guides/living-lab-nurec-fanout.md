@@ -1,5 +1,7 @@
 # Living-lab digital twin: parameterized neural reconstruction (16-GPU default)
 
+[Guides](README.md)
+
 A "living lab" is a research space observed by many cameras. This workflow turns
 real multi-view captures of such a space into a **multi-zone digital twin**:
 independent NVIDIA NuRec / NRE neural reconstructions, one per RTX PRO 6000
@@ -120,13 +122,13 @@ npa workbench workflow plan-spec \
 Stage the npa source the pods install (the NRE image has no `npa`), then submit:
 
 ```bash
-export NPA_SRC_S3_URI=s3://<your-bucket>/npa-src/<tag>
+export NPA_SRC_S3_URI="s3://<your-bucket>/npa-src/<tag>"
 RUN_ID="living-lab-$(date -u +%Y%m%dt%H%M%S)z"
 npa workbench workflow submit \
   workflows/testing/living-lab-nurec-fanout.yaml \
   --run-id "$RUN_ID" --runtime \
-  --infra k8s/<your-rtx-16gpu-context> \
-  --var bucket=<your-bucket> \
+  --infra "k8s/<your-rtx-16gpu-context>" \
+  --var bucket="<your-bucket>" \
   --var prefix="checkpoints/living-lab/$RUN_ID" \
   --secret-env AWS_ACCESS_KEY_ID --secret-env AWS_SECRET_ACCESS_KEY \
   --secret-env NGC_API_KEY
@@ -175,3 +177,16 @@ sanitized diagnostic errors (counts / reasons only).
 - Parameterization changes topology size (zone count, expected device count,
   parallel member count) only; it does not change the per-shard NRE pipeline or
   the proof semantics.
+
+## Clean up
+
+Idle GPU clusters keep billing after the run finishes. When you are done,
+tear them down:
+
+```bash
+npa destroy --project "<alias>" --all
+```
+
+The plan previews read-only until you pass `--yes`, and the Nebius project
+itself is retained by default. See [teardown](../../teardown.md) for what
+`npa destroy` removes (cloud spend) versus what it keeps.

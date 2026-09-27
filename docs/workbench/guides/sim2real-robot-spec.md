@@ -1,5 +1,7 @@
 # Canonical Sim2Real RobotSpec input
 
+[Guides](README.md)
+
 The canonical 14-stage workflow accepts one optional `config.robot_spec_uri`.
 Leave it empty for the unchanged stock Franka path. Set it to an exact `s3://`
 object containing `npa.sim2real.robot_spec.v1` to run a custom articulated robot.
@@ -61,7 +63,7 @@ npa workbench workflow submit "$SPEC" --runtime \
   --secret-env HF_TOKEN
 ```
 
-Run `npa workbench health preflight` and `npa workbench health access sim2real`
+Run `npa workbench health preflight` and `npa workbench health sim2real`
 before submit. Image values must be registry-qualified immutable digests.
 
 ## Integrity and observability

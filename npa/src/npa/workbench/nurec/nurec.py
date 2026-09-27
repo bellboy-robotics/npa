@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -399,16 +400,42 @@ class NurecConfig:
     @property
     def image_repository(self) -> str:
         """``nvidia/nre/nre-ga`` for ``nvcr.io/nvidia/nre/nre-ga:26.04``."""
-        ref = str(self.image or "")
-        without_tag = ref.rsplit(":", 1)[0] if "/" in ref.rsplit(":", 1)[0] else ref
-        parts = without_tag.split("/", 1)
-        return parts[1] if len(parts) == 2 and "." in parts[0] else without_tag
+        _registry, repository, _reference = _split_registry_image(self.image)
+        return repository
 
     @property
     def image_registry(self) -> str:
-        ref = str(self.image or "")
-        head = ref.split("/", 1)[0]
-        return head if ("." in head or ":" in head) else ""
+        registry, _repository, _reference = _split_registry_image(self.image)
+        return registry
+
+    @property
+    def image_manifest_reference(self) -> str:
+        """Exact tag or digest selected by ``image`` (``latest`` if omitted)."""
+        _registry, _repository, reference = _split_registry_image(self.image)
+        return reference
+
+
+def _split_registry_image(image: str) -> tuple[str, str, str]:
+    """Return registry, repository, and exact tag/digest for an OCI reference."""
+
+    value = str(image or "").strip().removeprefix("docker:")
+    if not value:
+        return "", "", ""
+    head, separator, remainder = value.partition("/")
+    if separator and ("." in head or ":" in head or head == "localhost"):
+        registry = head
+    else:
+        registry = ""
+        remainder = value
+    if "@" in remainder:
+        repository, reference = remainder.split("@", 1)
+        if ":" in repository.rsplit("/", 1)[-1]:
+            repository = repository.rsplit(":", 1)[0]
+    elif ":" in remainder.rsplit("/", 1)[-1]:
+        repository, reference = remainder.rsplit(":", 1)
+    else:
+        repository, reference = remainder, "latest"
+    return registry, repository.strip("/"), reference
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -758,6 +785,7 @@ class NurecReconstructResult:
     command: tuple[str, ...] = ()
     output_uri: str = ""
     errors: tuple[str, ...] = ()
+    initialization: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -770,6 +798,7 @@ class NurecReconstructResult:
             "parsed_config_path": self.parsed_config_path,
             "metrics_path": self.metrics_path,
             "metrics": dict(self.metrics),
+            "initialization": dict(self.initialization),
             "gt_dir": self.gt_dir,
             "command": list(self.command),
             "output_uri": self.output_uri,
@@ -1017,15 +1046,17 @@ def check_nurec_access(
 def _check_ngc_image(
     config: NurecConfig, env: Mapping[str, str], timeout: float
 ) -> str:
-    """Token-exchange + tag listing against the registry (no layer download)."""
+    """Token exchange plus an exact tag/digest manifest probe (no layer pull)."""
     import base64
+    from urllib.parse import quote
 
     import httpx
 
     key = env.get(config.ngc_api_key_env, "")
     registry = config.image_registry or DEFAULT_NRE_REGISTRY_HOST
     repository = config.image_repository
-    if not repository:
+    reference = config.image_manifest_reference
+    if not repository or not reference:
         return "unresolved"
     basic = base64.b64encode(f"$oauthtoken:{key}".encode()).decode()
     try:
@@ -1042,14 +1073,31 @@ def _check_ngc_image(
         token = str(auth.json().get("token") or "")
         if not token:
             return "auth-no-token"
-        tags = httpx.get(
-            f"https://{registry}/v2/{repository}/tags/list",
-            headers={"Authorization": f"Bearer {token}"},
+        manifest = httpx.get(
+            f"https://{registry}/v2/{repository}/manifests/"
+            f"{quote(reference, safe=':')}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": ", ".join(
+                    (
+                        "application/vnd.docker.distribution.manifest.v2+json",
+                        "application/vnd.docker.distribution.manifest.list.v2+json",
+                        "application/vnd.oci.image.manifest.v1+json",
+                        "application/vnd.oci.image.index.v1+json",
+                    )
+                ),
+            },
             timeout=timeout,
         )
     except Exception:  # noqa: BLE001 - any transport failure is "not reachable"
         return "unreachable"
-    return "reachable" if 200 <= tags.status_code < 300 else f"tags-{tags.status_code}"
+    if manifest.status_code == 402:
+        return "entitlement-required"
+    return (
+        "reachable"
+        if 200 <= manifest.status_code < 300
+        else f"manifest-{manifest.status_code}"
+    )
 
 
 def check_ngc_image_access(
@@ -1058,7 +1106,7 @@ def check_ngc_image_access(
     image: str = DEFAULT_NRE_IMAGE,
     timeout: float = 30.0,
 ) -> str:
-    """Probe token exchange and pull entitlement for one NGC image repository."""
+    """Probe token exchange and pull access for one exact NGC image tag/digest."""
 
     config = NurecConfig(image=image)
     return _check_ngc_image(config, {config.ngc_api_key_env: api_key}, timeout)
@@ -1464,7 +1512,10 @@ def validate_fetch_provenance(
         errors.append(
             f"variant observed={observed_variant!r} != requested={requested_variant!r}"
         )
-    if requested_dataset_id and str(fetched.get("dataset_id") or "") != requested_dataset_id:
+    if (
+        requested_dataset_id
+        and str(fetched.get("dataset_id") or "") != requested_dataset_id
+    ):
         errors.append("dataset_id mismatch")
     return (not errors), errors
 
@@ -1472,15 +1523,30 @@ def validate_fetch_provenance(
 def find_ncore_json(scene_dir: Path) -> Path | None:
     """Return the NCore V4 metadata JSON that sits next to the ``.zarr.itar`` shards.
 
-    NCore names the metadata ``<NAME>.json`` alongside ``<NAME>.zarr.itar``, so
-    prefer a JSON whose stem matches a shard; fall back to the shallowest JSON.
+    Prefer a valid V4 metadata document so conversion provenance and rig sidecars
+    cannot hide a renamed sequence. Retain the legacy shard-name fallback for
+    older exports whose metadata does not identify its format.
     """
     shard_stems = {path.name.split(".", 1)[0] for path in scene_dir.rglob("*.itar")}
     candidates = sorted(scene_dir.rglob("*.json"), key=lambda p: (len(p.parts), p.name))
+    # Conversion publishes a stable sequence.json alongside conversion.json and
+    # npa-rig.json. Its filename need not share the original shard stem: inspect
+    # V4 metadata before applying the legacy filename fallback.
+    for candidate in candidates:
+        try:
+            metadata = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(metadata, dict)
+            and metadata.get("version") == "v4"
+            and metadata.get("component_stores")
+        ):
+            return candidate
     for candidate in candidates:
         if candidate.name.split(".", 1)[0] in shard_stems:
             return candidate
-    return candidates[0] if candidates else None
+    return None
 
 
 def read_rig_sidecar(ncore_json: Path | str) -> dict[str, Any]:
@@ -1573,9 +1639,17 @@ def reconstruct_scene(
     runner: RunCallable | None = None,
     dry_run: bool = False,
     export_gt: bool = True,
+    gt_frame_step: int = DEFAULT_GT_FRAME_STEP_CAMERA,
     timeout: float | None = None,
 ) -> NurecReconstructResult:
     """Train a 3DGUT Gaussian reconstruction and collect its USDZ + metrics."""
+    from npa.workbench.nurec.ncore_initialization import (
+        export_initialization,
+        plan_initialization,
+    )
+
+    verify_ncore_input(ncore_json)
+    config, initialization = plan_initialization(config, ncore_json)
     env = dict(environ if environ is not None else os.environ)
     run = runner or subprocess.run
     out_dir = config.resolved_out_dir
@@ -1596,8 +1670,10 @@ def reconstruct_scene(
             parsed_config_path="",
             metrics_path="",
             command=tuple(command),
+            initialization=initialization,
         )
 
+    initialization = export_initialization(ncore_json, initialization)
     out_dir.mkdir(parents=True, exist_ok=True)
     result = _run(command, env=_nre_env(config, env), run=run, timeout=timeout)
     if result.returncode != 0:
@@ -1611,6 +1687,7 @@ def reconstruct_scene(
             parsed_config_path="",
             metrics_path="",
             command=tuple(command),
+            initialization=initialization,
             errors=(
                 f"NRE reconstruction failed (exit {result.returncode}): "
                 f"{_sanitize(result, config, env)}",
@@ -1639,6 +1716,7 @@ def reconstruct_scene(
         gt_args = build_nre_export_gt_args(
             ncore_json=ncore_json,
             output_dir=str(gt_target),
+            frame_step_camera=gt_frame_step,
         )
         gt_result = _run(
             nre_command(
@@ -1666,6 +1744,7 @@ def reconstruct_scene(
         gt_dir=gt_dir,
         command=tuple(command),
         errors=tuple(errors),
+        initialization=initialization,
     )
 
 
@@ -1796,7 +1875,9 @@ def parse_metrics_yaml(path: Path | str) -> dict[str, float]:
                 for name, entry in aggregated.items():
                     if isinstance(entry, dict):
                         value = entry.get("value")
-                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        if isinstance(value, (int, float)) and not isinstance(
+                            value, bool
+                        ):
                             metrics[str(name)] = float(value)
             return metrics
     except ImportError:
@@ -1964,6 +2045,8 @@ def materialize_uri(
     in ``/tmp`` between them: the NCore sequence and the trained USDZ have to
     travel through S3. A local ``source_uri`` is returned as-is so the
     single-pod SkyPilot task keeps working without a round-trip.
+    Remote prefixes use a fresh generation alongside ``destination``; callers
+    must use the returned path. Existing generations are never overlaid.
     """
     if not source_uri:
         raise NurecError("source_uri is required")
@@ -1971,6 +2054,7 @@ def materialize_uri(
         local = Path(source_uri)
         if not local.exists():
             raise NurecError(f"local source does not exist: {local}")
+        _verify_materialized_colmap(local)
         return local
 
     from npa.clients.storage import StorageClient
@@ -1979,11 +2063,56 @@ def materialize_uri(
     target = Path(destination)
     is_prefix = source_uri.endswith("/")
     if is_prefix:
-        target.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Retain only this download as the returned generation. Overlaying an
+        # old cache can select a different, internally valid prior capture.
+        downloaded = Path(tempfile.mkdtemp(prefix=f"{target.name}-", dir=target.parent))
+        try:
+            client.download_path(source_uri, str(downloaded))
+            _verify_materialized_colmap(downloaded)
+        except Exception:
+            shutil.rmtree(downloaded)
+            raise
+        return downloaded
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-    client.download_path(source_uri, str(target))
+        client.download_path(source_uri, str(target))
+    _verify_materialized_colmap(target)
     return target
+
+
+def verify_ncore_input(ncore_json: Path | str) -> None:
+    """Check converted local inputs before sensor discovery or NRE execution.
+
+    Legacy sequences without conversion sidecars retain their existing path.
+    Only the selected sequence directory is checked, not unrelated captures.
+    """
+    root = Path(ncore_json).parent
+    if not any(
+        path.exists() or path.is_symlink()
+        for path in (root / "conversion.json", root / ".npa-colmap-claim.json")
+    ):
+        return
+    from npa.workbench.nurec.colmap import verify_conversion_inventory
+
+    verify_conversion_inventory(root)
+
+
+def _verify_materialized_colmap(path: Path) -> None:
+    from npa.workbench.nurec.colmap import (
+        CONVERSION_REPORT,
+        PUBLICATION_CLAIM,
+        verify_conversion_inventory,
+    )
+
+    root = path if path.is_dir() else path.parent
+    directories = {
+        sidecar.parent
+        for name in (CONVERSION_REPORT, PUBLICATION_CLAIM)
+        for sidecar in root.rglob(name)
+    }
+    for directory in sorted(directories):
+        verify_conversion_inventory(directory)
 
 
 def publish_ncore_sequence(

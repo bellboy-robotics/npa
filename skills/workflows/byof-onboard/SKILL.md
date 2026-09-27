@@ -24,6 +24,13 @@ names), encoding each accepted claim as a `solution-smoke` with a named JSON
 artifact, and collecting live Nebius validation evidence. See
 `docs/workbench/oss-solution-catalog.md`.
 
+If legal, license, or gated-access restrictions prevent source, SDKs, weights,
+datasets, or assets from being baked into the BYOF image, load
+`skills/workflows/runtime-fetch-onboard/SKILL.md`. Prefer a clean bootstrap
+container plus operator-authorized runtime fetch over rejecting the entire
+solution; keep any use, service, field-of-use, and output restrictions
+fail-closed.
+
 ## Prerequisites
 
 - `~/.npa/config.yaml` — project alias, registry override, `kubernetes` block (`cluster_name`, `gpu_profile`)
@@ -140,6 +147,17 @@ npa/.venv/bin/python npa/scripts/run_byof_repo.py \
 
 SDK: `npa.sdk.workbench.byof.run(...)` / `plan_argv(...)`.
 YAML toolRef: `workbench.byof.repo` → `npa workbench byof run ...`.
+
+For a standard `npa.workflow` submit, use `base_profile: prebuilt` with
+`workload: solution-smoke` and a digest-pinned image in the workflow resources.
+The command runs inside that allocated worker; it must not invoke another
+SkyPilot launch. Workbench checks the actual `NPA_TASK_IMAGE` and the image's
+`npa_source_metadata.json`, runs the real capability, uploads its outputs and
+failure diagnostics, and completes any registered postprocessor (including
+Wan's mandatory verified RRD). Worker markers are injected automatically.
+The outer run ID and lower-level worker run ID are separate provenance fields.
+Image builds and other host-orchestrated BYOF workloads must run from the
+operator entrypoint above, before workflow submission.
 
 Workloads:
 

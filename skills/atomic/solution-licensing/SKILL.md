@@ -35,6 +35,12 @@ third-party EULA, also load
 `skills/atomic/third-party-eula-preflight/SKILL.md`; licensing classification
 does not itself establish operator consent or upstream asset access.
 
+When the classification says an artifact may be used but not baked or
+redistributed, load `skills/workflows/runtime-fetch-onboard/SKILL.md`. It turns
+that decision into a bootstrap-container, runtime-delivery, cache, and validation
+contract so a restricted weight or SDK does not unnecessarily block the rest of
+the onboarding.
+
 ## The Six Artifact Boundaries
 
 Classify each boundary separately. A permissive answer at one boundary says
@@ -85,6 +91,13 @@ npa/.venv/bin/python -c "import importlib.metadata as m; print(m.metadata('<pkg>
 
 A package whose `License` field literally reads *"NVIDIA Proprietary Software"*
 settles the question regardless of what the GitHub repo's badge says.
+
+For compiled wheels, inspect embedded dependencies, certificate data and fonts,
+not only the package's top-level grant. An SBOM license expression does not
+deliver required copyright or permission text. Bind the exact notices and any
+required corresponding source to the shipped artifact/member hashes, then
+verify that recipients actually receive those bytes, including obligations for
+superseded components retained in ancestor layers.
 
 ### 3. Ask the redistribution question explicitly
 
@@ -156,6 +169,53 @@ current artifact scans, real capability validation, or release verification.
 
 Three patterns do the real work. Prefer them over asking for an exception.
 
+### Default operator-responsibility policy
+
+Use this default for a public zero-restricted-payload image whose third-party
+artifacts are delivered directly to the operator at runtime:
+
+> The operator initiates runtime fetch with their own credential and is
+> responsible for using the credential and fetched artifact under the exact
+> upstream terms. NPA verifies access to the immutable artifact, stores neither
+> the credential nor restricted bytes in the public image, and makes no claim
+> that the credential authorizes redistribution.
+
+Apply these rules once, consistently, instead of reopening the same question
+for every image:
+
+- A customer-owned Hugging Face or NGC credential plus a successful upstream
+  usable-payload probe is operationally sufficient for NPA to fetch from that
+  exact provider, repository or artifact, revision, and account. It is not
+  legal acceptance or proof of compliance. Do not add an NPA acceptance
+  checkbox or ask the operator to attest again.
+- Preserve the exact operator statement once under one bounded manager task/run
+  ID. If the operator states `noncommercial`, record exactly `noncommercial`;
+  capture the intended activity separately. Child solutions may reference that
+  record when their exact terms are compatible, without another per-image
+  question. The record expires with the task/run and is never global or
+  permanent. Reopen the decision only if the operator changes scope or an exact
+  artifact's authoritative terms require a concrete additional fact.
+- Keep entitlement provider- and artifact-scoped. An HF token says nothing
+  about an unrelated NGC, CUDA, cuDNN, dataset, or asset endpoint; an NGC token
+  says nothing about an unrelated HF repository. Prefer a vendor-gated runtime
+  artifact or an operator-provided runtime when the otherwise selected endpoint
+  provides no verifiable entitlement.
+- Classify the public image from its built bytes. A neutral image is eligible
+  for public classification only when every baked byte has verified
+  redistribution rights, byte-level inspection proves no gated or
+  redistribution-restricted payload is present, and all `secure-image-build`
+  publication gates pass. Runtime-fetch `Ready` grants no redistribution rights.
+- Do not invent output or service restrictions. Escalate only a restriction
+  stated by authoritative terms or concrete conflicting provenance. If the
+  applicable terms contain no output restriction, record `none found` and
+  continue. Running GPL software fetched directly by the operator is not NPA
+  redistribution; GPL source-conveyance duties arise if NPA conveys the GPL
+  bytes.
+
+This policy does not override an explicit vendor click-through, license key,
+paid/enterprise entitlement, prohibited service use, or output restriction. Use
+the vendor's own mechanism once and reuse its result within the exact scope.
+
 **Runtime fetch under the customer's own credentials.** Never bake gated or
 redistribution-restricted weights merely because a token can gate image access.
 The image ships the downloader; the operator supplies their own HF/NGC
@@ -163,9 +223,12 @@ credential at runtime and fetches an exact immutable revision when the selected
 asset requires authorization. Do not require a token for genuinely public,
 anonymous weights. For Hugging Face, the token and its actual upstream repository
 permission are the only local access gate: probe every required repository before
-provisioning, with no NPA terms boolean or model-check bypass. An HF or NGC token
-proves authorization to fetch; it is not EULA acceptance and does not change
-redistribution rights.
+provisioning, with no NPA terms boolean or model-check bypass. Token presence
+alone proves neither access nor acceptance. For a gated artifact, a successful
+provider-side payload probe is operationally sufficient for NPA to fetch that
+exact artifact; it is not legal acceptance, proof of compliance, or permission
+to redistribute. Compliant use remains the credential owner's responsibility,
+and NPA does not collect a duplicate attestation.
 
 **Build-your-own.** For a runtime we may not redistribute, ship the Dockerfile
 and the build tooling, not the built image. Each operator builds into their own
@@ -273,9 +336,9 @@ rather than the argument.
 **Wrong answer #1: "the source is Apache-2.0, so the image is fine."** The decisive layer
 is the baked runtime, and publishing an image distributes every byte in it.
 
-**Wrong answer #2: "Isaac Lab's repo is BSD-3, so we can bake that half and only
-runtime-fetch Isaac Sim."** This is the trap worth memorising, because it looks like
-diligence. Read the *package metadata*, not the repo badge:
+**Wrong answer #2 for the historical Lab 2 wheel: "Isaac Lab's repo is BSD-3, so
+we can bake that half and only runtime-fetch Isaac Sim."** Read the exact
+*package metadata*, not the repo badge:
 
 ```
 $ curl -sL https://pypi.nvidia.com/isaaclab/isaaclab-2.3.2.post1-cp311-none-manylinux_2_35_x86_64.whl -o w.whl
@@ -290,18 +353,31 @@ express license agreement from NVIDIA CORPORATION is strictly prohibited"*. The 
 is a differently-licensed repackaging of the BSD-3 **repo**. Same project, same version,
 two licences, and only one of them is on the artefact you would ship.
 
+That example concerns `isaaclab==2.3.2.post1`. The Arena-selected
+`isaaclab==3.0.0b2.post1` wheel instead declares BSD-3-Clause, as recorded in
+[Arena's notices](../../../npa/docker/workbench/isaac-arena/THIRD_PARTY_NOTICES.md).
+Its exact wheel hash is in the [runtime lock](../../../npa/docker/workbench/common/isaac3-nvidia-wheels.txt).
+The exact wheel has no standalone license member; Arena's machine-readable
+license evidence records the wheel and `METADATA` hashes, and the runtime
+bootstrap rejects a changed installed `License` field.
+Do not transfer the older wheel's classification to this version, or extend
+the Lab wheel's BSD grant to Isaac Sim 6.0.1.0 and its proprietary dependencies.
+Arena still fetches the complete simulator runtime closure at run time; its
+baked Apache-2.0 Arena application source is a separate artifact.
+
 **Also wrong: "gate the image behind a runtime token."** A token gates a *download*. If
 the bytes are already in the layers, a token protects nothing — you have just added a
 speed bump in front of a redistribution you have already performed. Any proposal of the
 form "we keep baking it but add an access control" is answering the wrong question.
 
 **The answer that worked: move the vendor's delivery to the customer — for the whole
-SDK, not just the weights.** The images were re-architected to contain **no NVIDIA Isaac
-bytes at all**. On first run they download Isaac Sim and Isaac Lab from
+SDK, not just the weights.** The images were re-architected to exclude the
+Isaac Sim/Lab wheels and restricted Kit runtime payloads. On first run they
+download Isaac Sim and Isaac Lab from
 `https://pypi.nvidia.com` into a cache volume. NPA defaults NVIDIA's documented
 `ACCEPT_EULA=Y` for these non-interactive workloads and preserves an explicit opt-out.
-NVIDIA still delivers the runtime directly to each operator; we redistribute no Isaac
-bytes, so the redistribution conclusion does not depend on the EULA UX default.
+NVIDIA still delivers those runtime wheels directly to each operator; they are
+absent from public image layers, independently of the EULA UX default.
 The clean runtime-fetch `isaac-lab`, `sonic`, and `groot` images may therefore be
 classified `redistribution: public`. Historical SONIC L40S and inherited MuJoCo
 artifacts contain restricted payload; replacing them does not make those old
@@ -321,7 +397,7 @@ solution should expect to produce all three:
    must run non-interactively. Empty, `N`, `NO`, `0`, and `FALSE` must refuse
    before downloading; `Y`, `YES`, `1`, and `TRUE` normalize to acceptance;
    unrecognized values fail separately as invalid. The public-image control
-   remains the verified absence of Isaac bytes.
+   remains the verified absence of restricted simulator runtime payloads.
 2. **The absence is verified on the artefact.** `npa/scripts/scan_image_omniverse_payload.py`
    streams the built image's filesystem and layer history and fails on Kit payload
    signatures. Reading the Dockerfile is not evidence — the claim is about bytes in

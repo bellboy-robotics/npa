@@ -1,11 +1,11 @@
 # Pick-and-Place with a Franka Arm in Genesis
 
-**The hook:** spin up thousands of Franka Emika Panda arms in parallel inside
-the Genesis physics engine, train one of them to pick up a cube and drop it in a
-target zone, then record demonstrations you can turn into a LeRobot dataset —
-the same format the famous DROID Franka dataset uses.
+[Guides](README.md)
 
-This is the classic "hello robot" of manipulation, done at GPU scale.
+Train and evaluate a PPO teacher for Franka cube pick-and-place in Genesis,
+then record demonstrations for LeRobot. The recorded H200 run produced real
+checkpoint weights but zero successful held-out episodes; use evaluation to
+determine whether a checkpoint is suitable for demonstrations.
 
 ## Ingredients
 
@@ -81,9 +81,11 @@ npa workbench genesis eval-teacher --checkpoint ./checkpoints/teacher/model.pt
 
 ## Go bigger
 
-- **Full training runs locally or on a workbench VM.** `train-teacher` (and
-  `generate-demos` / `eval-teacher`) run on your GPU box, or on a Workbench VM
-  when you pass `-p <project> -n <workbench>` (forwarded over SSH).
+- **Scale up on cloud GPUs.** `train-teacher` (and `generate-demos` /
+  `eval-teacher`) run on your local GPU box by default — the Fast path above
+  proves the loop there. For full-scale runs, target a GPU workbench VM by
+  passing `-p <project> -n <workbench>` (forwarded over SSH), or submit to
+  Nebius serverless with `--runtime serverless` (next bullet).
 - **Serverless runs real PPO training.** `train-teacher --runtime serverless`
   submits the same training implementation as a Nebius AI Job and uploads its
   checkpoint and summaries to `--output-path`. It needs `--project-id`, or a
@@ -100,11 +102,11 @@ A serverless H200 training example:
 
 ```bash
 npa workbench genesis train-teacher \
-  --runtime serverless --project-id <your-project-id> \
+  --runtime serverless --project-id "<your-project-id>" \
   --gpu-type h200 --gpu-count 1 \
-  --job-name <your-training-job-name> \
+  --job-name "<your-training-job-name>" \
   --n-envs 1024 --max-iterations 500 --action-space cartesian \
-  --output-path s3://<your-bucket>/<new-training-prefix>/
+  --output-path "s3://<your-bucket>/<new-training-prefix>/"
 ```
 
 Inspect `model.pt`, `arch_config.json`, `train_teacher_summary.json`, and
@@ -168,3 +170,16 @@ real:
 - Env source: `npa/src/npa/genesis/env_pick_place.py`
 - Commands: `npa workbench genesis train-teacher | generate-demos | eval-teacher | eval-student | diagnose | tune`
 - Skill: `skills/tools/genesis/SKILL.md`
+
+## Clean up
+
+Idle GPU clusters keep billing after the run finishes. When you are done,
+tear them down:
+
+```bash
+npa destroy --project "<alias>" --all
+```
+
+The plan previews read-only until you pass `--yes`, and the Nebius project
+itself is retained by default. See [teardown](../../teardown.md) for what
+`npa destroy` removes (cloud spend) versus what it keeps.

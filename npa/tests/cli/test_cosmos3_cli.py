@@ -114,9 +114,11 @@ def test_cosmos3_generate_dry_run_plans_with_guardrails_on(tmp_path) -> None:
     assert payload["status"] == "planned"
     assert payload["mode"] == "text2image"
     assert payload["guardrails"] is True
+    assert payload["guardrail_state"]["status"] == "pending"
     assert payload["weights_baked"] is False
     assert "--no-guardrails" not in payload["argv"]
-    assert "cosmos_framework.scripts.inference" in payload["argv"]
+    assert "npa.workbench.cosmos.guarded_inference" in payload["argv"]
+    assert payload["inference_module"] == "cosmos_framework.scripts.inference"
 
 
 def test_cosmos3_generate_dry_run_opts_out_of_guardrails_explicitly(tmp_path) -> None:
@@ -141,7 +143,9 @@ def test_cosmos3_generate_dry_run_opts_out_of_guardrails_explicitly(tmp_path) ->
     assert "--no-guardrails" in payload["argv"]
 
 
-def test_cosmos3_generate_fails_clearly_without_the_runtime(tmp_path, monkeypatch) -> None:
+def test_cosmos3_generate_fails_clearly_without_the_runtime(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("COSMOS3_REPO", str(tmp_path / "missing"))
 
     result = runner.invoke(
@@ -306,7 +310,9 @@ def test_cosmos3_ray_serve_wires_standard_model_cache(tmp_path, monkeypatch) -> 
     assert (cache / "huggingface/hub").is_dir()
 
 
-def test_cosmos3_ray_batch_invalid_response_exits_without_completed_output(tmp_path, mocker) -> None:
+def test_cosmos3_ray_batch_invalid_response_exits_without_completed_output(
+    tmp_path, mocker
+) -> None:
     batch = tmp_path / "batch.json"
     batch.write_text('{"samples":[{"name":"one","model_mode":"text2image"}]}')
     mocker.patch(
@@ -314,10 +320,20 @@ def test_cosmos3_ray_batch_invalid_response_exits_without_completed_output(tmp_p
         return_value={"schema_version": "unsupported"},
     )
     destination = tmp_path / "out"
-    result = runner.invoke(app, [
-        "workbench", "cosmos3", "ray-batch", "--input-path", str(batch),
-        "--output-path", str(destination), "--endpoint", "http://service.invalid:8000",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "workbench",
+            "cosmos3",
+            "ray-batch",
+            "--input-path",
+            str(batch),
+            "--output-path",
+            str(destination),
+            "--endpoint",
+            "http://service.invalid:8000",
+        ],
+    )
     assert result.exit_code == 1
     assert "unsupported Cosmos3 Ray response schema" in result.output
     assert "completed" not in result.stdout
