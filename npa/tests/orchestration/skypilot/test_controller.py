@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+import pytest
+
 from npa.orchestration.skypilot.controller import (
     DEFAULT_CONTROLLER_INSTANCE_TYPE,
     apply_controller_override,
@@ -94,6 +98,55 @@ def test_apply_controller_override_drops_disk_and_preserves_larger_shape() -> No
         "memory": 16,
         "autostop": False,
     }
+
+
+@pytest.mark.parametrize("cpus,memory,autostop", [(2, 8, False), (4, 16, 10)])
+def test_ha_controller_preserves_persistent_disk_size(cpus, memory, autostop) -> None:
+    source = {
+        "jobs": {
+            "controller": {
+                "high_availability": True,
+                "resources": {
+                    "cloud": "kubernetes",
+                    "cpus": cpus,
+                    "memory": memory,
+                    "disk_size": 256,
+                    "autostop": autostop,
+                },
+            }
+        },
+        "kubernetes": {"high_availability": {"storage_class_name": "block-storage"}},
+    }
+    original = deepcopy(source)
+    result = apply_controller_override(source, controller_region="training-context")
+
+    assert result["jobs"]["controller"]["resources"] == {
+        **source["jobs"]["controller"]["resources"],
+        "autostop": False,
+        "region": "training-context",
+    }
+    assert result["jobs"]["controller"]["high_availability"] is True
+    assert result["kubernetes"] == source["kubernetes"]
+    assert (
+        apply_controller_override(result, controller_region="training-context")
+        == result
+    )
+    assert source == original
+
+
+@pytest.mark.parametrize("high_availability", [False, None, "false"])
+def test_non_ha_controller_still_rejects_persistent_disk(high_availability) -> None:
+    result = apply_controller_override(
+        {
+            "jobs": {
+                "controller": {
+                    "high_availability": high_availability,
+                    "resources": {"cloud": "kubernetes", "disk_size": 256},
+                }
+            }
+        }
+    )
+    assert "disk_size" not in result["jobs"]["controller"]["resources"]
 
 
 def test_apply_controller_override_preserves_explicitly_larger_nebius_controller() -> (

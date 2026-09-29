@@ -83,8 +83,13 @@ def apply_controller_override(
     controller = jobs.setdefault("controller", {})
     existing = controller.get("resources")
     default = _controller_resources_for_backend(controller_backend)
+    # SkyPilot's HA Kubernetes controller uses disk_size for its persistent
+    # volume. Ordinary Kubernetes pods still do not support this override.
+    high_availability = controller.get("high_availability") is True
 
-    if isinstance(existing, dict) and _is_at_least_default(existing, default):
+    if isinstance(existing, dict) and _is_at_least_default(
+        existing, default, high_availability=high_availability
+    ):
         existing["autostop"] = DEFAULT_JOBS_CONTROLLER_AUTOSTOP
         _apply_controller_region(existing, controller_backend, controller_region)
         return updated
@@ -95,11 +100,16 @@ def apply_controller_override(
             {
                 key: value
                 for key, value in existing.items()
-                if key not in _unsupported_override_keys(controller_backend)
+                if key
+                not in _unsupported_override_keys(
+                    controller_backend, high_availability=high_availability
+                )
             }
         )
         merged["autostop"] = DEFAULT_JOBS_CONTROLLER_AUTOSTOP
-        if not _is_at_least_default(merged, default):
+        if not _is_at_least_default(
+            merged, default, high_availability=high_availability
+        ):
             merged = default
 
     _apply_controller_region(merged, controller_backend, controller_region)
@@ -143,10 +153,17 @@ def _controller_resources_for_backend(
     raise ValueError("controller_backend must be 'kubernetes' or 'nebius'")
 
 
-def _is_at_least_default(resources: dict[str, Any], default: dict[str, Any]) -> bool:
+def _is_at_least_default(
+    resources: dict[str, Any],
+    default: dict[str, Any],
+    *,
+    high_availability: bool = False,
+) -> bool:
     if not _compatible_controller_cloud(resources, default):
         return False
-    for key in _unsupported_override_keys(_backend_from_default(default)):
+    for key in _unsupported_override_keys(
+        _backend_from_default(default), high_availability=high_availability
+    ):
         if key in resources:
             return False
     for key in ("cpus", "memory", "disk_size"):
@@ -174,8 +191,10 @@ def _compatible_controller_cloud(
     return resources.get("cloud") in {None, default.get("cloud")}
 
 
-def _unsupported_override_keys(controller_backend: ControllerBackend) -> set[str]:
-    if controller_backend == "kubernetes":
+def _unsupported_override_keys(
+    controller_backend: ControllerBackend, *, high_availability: bool = False
+) -> set[str]:
+    if controller_backend == "kubernetes" and not high_availability:
         return {"disk_size"}
     return set()
 
