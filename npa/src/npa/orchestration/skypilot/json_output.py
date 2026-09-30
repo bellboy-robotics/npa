@@ -17,11 +17,32 @@ _EMPTY_QUEUE_MESSAGES = {
     "sky.exceptions.clusternotuperror: no in-progress managed jobs.",
 }
 
+# SkyPilot 0.12.2 prints this diagnostic before otherwise valid queue JSON.
+# Its key list is JSON too; only the complete known line is non-payload text.
+_CONFIG_MISMATCH_WARNING = re.compile(
+    r'The following keys \(\["[A-Za-z_][A-Za-z_0-9.]*"'
+    r'(?:,\s*"[A-Za-z_][A-Za-z_0-9.]*")*\]\) have different values in the '
+    r"client SkyPilot config with the server and will be ignored\. Remove these "
+    r"keys to disable this warning\. If you want to specify it, please modify "
+    r"it on server side or contact your administrator\."
+)
+
+
+def _without_config_mismatch_warning(value: str) -> str:
+    """Exclude the complete native diagnostic, never arbitrary JSON preambles."""
+
+    ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    return "".join(
+        line
+        for line in str(value or "").splitlines(keepends=True)
+        if not _CONFIG_MISMATCH_WARNING.fullmatch(ansi.sub("", line).strip())
+    )
+
 
 def queue_rows_from_output(output: str) -> list[dict[str, Any]] | None:
     """Parse a verified SkyPilot queue list from one unambiguous JSON payload."""
 
-    payload = parse_single_json_document(output)
+    payload = parse_single_json_document(_without_config_mismatch_warning(output))
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict) and isinstance(payload.get("jobs"), list):
@@ -80,7 +101,7 @@ def _semantic_queue_lines(value: str, *, structured: bool) -> list[str] | None:
 
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
     normalized: list[str] = []
-    for raw in str(value or "").splitlines():
+    for raw in _without_config_mismatch_warning(value).splitlines():
         line = " ".join(ansi.sub("", raw).strip().lower().split())
         if not line:
             continue
@@ -128,7 +149,7 @@ def _semantic_queue_lines(value: str, *, structured: bool) -> list[str] | None:
 def _without_single_json_document(value: str) -> str | None:
     """Remove the one JSON document while retaining surrounding diagnostics."""
 
-    text = str(value or "")
+    text = _without_config_mismatch_warning(value)
     decoder = json.JSONDecoder()
     matches: list[tuple[int, int]] = []
     for index, character in enumerate(text):
