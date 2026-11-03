@@ -19,7 +19,7 @@ from npa.orchestration.skypilot.cleanup import (
     cluster_name_patterns_for_run,
     sky_environment,
 )
-from npa.orchestration.skypilot.json_output import without_config_mismatch_warning
+from npa.orchestration.skypilot.json_output import _without_config_mismatch_warning
 
 
 @dataclass
@@ -146,7 +146,7 @@ def restore_signal_handlers(
 
 def _matching_clusters(output: str, patterns: list[str]) -> list[str]:
     try:
-        payload = json.loads(without_config_mismatch_warning(output) or "[]")
+        payload = json.loads(_without_config_mismatch_warning(output) or "[]")
     except json.JSONDecodeError:
         return []
     clusters = payload if isinstance(payload, list) else payload.get("clusters", [])

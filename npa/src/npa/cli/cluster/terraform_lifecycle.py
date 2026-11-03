@@ -72,7 +72,7 @@ from npa.orchestration.skypilot.cluster_validation import (
     current_validation_session,
     validation_session,
 )
-from npa.orchestration.skypilot.json_output import without_config_mismatch_warning
+from npa.orchestration.skypilot.json_output import _without_config_mismatch_warning
 
 _DEFAULT_TERRAFORM_SUBDIR = Path("deploy") / "cluster"
 _DEFAULT_SKYPILOT_BIN = Path.home() / ".npa" / "skypilot-venv" / "bin" / "sky"
@@ -4301,7 +4301,7 @@ def _wait_for_sky_down(
                 "SkyPilot cleanup status failed; remote absence is unverified"
             )
         try:
-            rows = json.loads(without_config_mismatch_warning(result.stdout))
+            rows = json.loads(_without_config_mismatch_warning(result.stdout))
         except (ValueError, TypeError):
             raise typer.BadParameter(
                 "SkyPilot cleanup returned malformed status; remote absence is unverified"
