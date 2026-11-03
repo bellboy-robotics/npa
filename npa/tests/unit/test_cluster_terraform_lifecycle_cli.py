@@ -3441,19 +3441,3 @@ def test_preflight_ordinary_on_demand_sufficient_passes(monkeypatch) -> None:
         "nebius", _strict_preflight_tfvars(mig=False, block=False), {}
     )
     assert any("quota-allowance" in a for a in seen)
-
-
-def test_sky_cleanup_accepts_absence_after_native_config_warning(monkeypatch) -> None:
-    warning = (
-        'The following keys (["allowed_clouds"]) have different values in the client '
-        "SkyPilot config with the server and will be ignored. Remove these keys to "
-        "disable this warning. If you want to specify it, please modify it on server "
-        "side or contact your administrator.\n"
-    )
-    monkeypatch.setattr(
-        tf_mod, "_run_capture", lambda *_args, **_kwargs: _completed(warning + "[]")
-    )
-    monkeypatch.setattr(
-        tf_mod.time, "sleep", lambda *_args: pytest.fail("absence must be accepted")
-    )
-    tf_mod._wait_for_sky_down("/opt/npa/sky", "validation", {})
