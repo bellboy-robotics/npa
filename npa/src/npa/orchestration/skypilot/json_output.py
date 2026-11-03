@@ -28,7 +28,7 @@ _CONFIG_MISMATCH_WARNING = re.compile(
 )
 
 
-def _without_config_mismatch_warning(value: str) -> str:
+def without_config_mismatch_warning(value: str) -> str:
     """Exclude the complete native diagnostic, never arbitrary JSON preambles."""
 
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -39,16 +39,10 @@ def _without_config_mismatch_warning(value: str) -> str:
     )
 
 
-def skypilot_json_payload(output: str) -> Any | None:
-    """Parse one SkyPilot JSON payload, ignoring only the native config warning."""
-
-    return parse_single_json_document(_without_config_mismatch_warning(output))
-
-
 def queue_rows_from_output(output: str) -> list[dict[str, Any]] | None:
     """Parse a verified SkyPilot queue list from one unambiguous JSON payload."""
 
-    payload = skypilot_json_payload(output)
+    payload = parse_single_json_document(without_config_mismatch_warning(output))
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict) and isinstance(payload.get("jobs"), list):
@@ -107,7 +101,7 @@ def _semantic_queue_lines(value: str, *, structured: bool) -> list[str] | None:
 
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
     normalized: list[str] = []
-    for raw in _without_config_mismatch_warning(value).splitlines():
+    for raw in without_config_mismatch_warning(value).splitlines():
         line = " ".join(ansi.sub("", raw).strip().lower().split())
         if not line:
             continue
@@ -155,7 +149,7 @@ def _semantic_queue_lines(value: str, *, structured: bool) -> list[str] | None:
 def _without_single_json_document(value: str) -> str | None:
     """Remove the one JSON document while retaining surrounding diagnostics."""
 
-    text = _without_config_mismatch_warning(value)
+    text = without_config_mismatch_warning(value)
     decoder = json.JSONDecoder()
     matches: list[tuple[int, int]] = []
     for index, character in enumerate(text):

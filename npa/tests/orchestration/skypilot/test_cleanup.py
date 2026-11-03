@@ -1610,3 +1610,31 @@ def test_a_job_group_is_terminal_only_when_every_task_is(tmp_path) -> None:
 )
 def test_in_progress_guard_is_recognized(detail: str, expected: bool) -> None:
     assert cleanup_module.looks_like_in_progress_jobs_error(detail) is expected
+
+
+def test_jobs_controller_inventory_ignores_native_config_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    sky_bin = _fake_sky(tmp_path)
+    warning = (
+        'The following keys (["allowed_clouds"]) have different values in the client '
+        "SkyPilot config with the server and will be ignored. Remove these keys to "
+        "disable this warning. If you want to specify it, please modify it on server "
+        "side or contact your administrator.\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        stdout = warning + '[{"name": "sky-jobs-controller-abc123", "status": "UP"}]'
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    clusters, error = cleanup_module._jobs_controller_clusters(
+        isolated_config_dir=None,
+        config_path=None,
+        sky_bin=sky_bin,
+        refresh=False,
+    )
+
+    assert [item["name"] for item in clusters] == ["sky-jobs-controller-abc123"]
+    assert error == ""

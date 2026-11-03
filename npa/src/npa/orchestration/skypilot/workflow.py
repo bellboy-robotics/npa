@@ -43,9 +43,10 @@ from npa.orchestration.skypilot.diagnostics import (
 )
 from npa.orchestration.skypilot.json_output import (
     is_verified_empty_queue_result,
+    parse_single_json_document,
     queue_rows_from_output,
-    skypilot_json_payload,
     verified_structured_queue_rows,
+    without_config_mismatch_warning,
 )
 from npa.orchestration.skypilot.launch_transaction import (
     ControllerState,
@@ -3534,7 +3535,7 @@ def _jobs_controller_statuses(output: str) -> list[tuple[str, str]]:
 def _json_payload_from_output(output: str) -> Any | None:
     # `sky status` prints the queue's config-mismatch warning too when a local
     # API server's allowed_clouds differs from the Kubernetes-only client.
-    return skypilot_json_payload(output)
+    return parse_single_json_document(without_config_mismatch_warning(output))
 
 
 def _load_yaml_documents(path: Path) -> tuple[bytes, list[dict[str, Any]]]:
