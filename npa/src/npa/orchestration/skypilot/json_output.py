@@ -39,10 +39,16 @@ def _without_config_mismatch_warning(value: str) -> str:
     )
 
 
+def skypilot_json_payload(output: str) -> Any | None:
+    """Parse one SkyPilot JSON payload, ignoring only the native config warning."""
+
+    return parse_single_json_document(_without_config_mismatch_warning(output))
+
+
 def queue_rows_from_output(output: str) -> list[dict[str, Any]] | None:
     """Parse a verified SkyPilot queue list from one unambiguous JSON payload."""
 
-    payload = parse_single_json_document(_without_config_mismatch_warning(output))
+    payload = skypilot_json_payload(output)
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict) and isinstance(payload.get("jobs"), list):

@@ -1,4 +1,4 @@
-"""Protect exact queue reconciliation from native diagnostics and ambiguous JSON."""
+"""Protect queue reconciliation and controller health checks from native diagnostics."""
 
 import json
 import subprocess
@@ -10,7 +10,8 @@ from npa.orchestration.skypilot.json_output import (
     queue_rows_from_output,
     verified_structured_queue_rows,
 )
-from npa.orchestration.skypilot.workflow import lookup_managed_job
+from npa.orchestration.skypilot import workflow as workflow_module
+from npa.orchestration.skypilot.workflow import SkyPilotSubmitError, lookup_managed_job
 
 
 WARNING = (
@@ -94,3 +95,30 @@ def test_warning_does_not_hide_conflicting_diagnostics(diagnostic):
     result = subprocess.CompletedProcess([], 0, WARNING + "[]\n" + diagnostic, "")
     assert verified_structured_queue_rows(result) is None
     assert not is_verified_empty_queue_result(result)
+
+
+@pytest.mark.parametrize(
+    "stdout,expected",
+    [
+        (WARNING + "[]\n", []),
+        (
+            WARNING
+            + json.dumps([{"name": "sky-jobs-controller-ab12", "status": "UP"}]),
+            [("sky-jobs-controller-ab12", "UP")],
+        ),
+    ],
+)
+def test_controller_health_reads_status_after_native_warning(stdout, expected):
+    assert workflow_module._jobs_controller_statuses(stdout) == expected
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        WARNING.replace('["allowed_clouds"]', '[{"name": "x"}]') + "[]",
+        'Unknown warning ["allowed_clouds"]\n[]',
+    ],
+)
+def test_controller_health_still_rejects_unknown_json_preambles(stdout):
+    with pytest.raises(SkyPilotSubmitError, match="non-json output"):
+        workflow_module._jobs_controller_statuses(stdout)
