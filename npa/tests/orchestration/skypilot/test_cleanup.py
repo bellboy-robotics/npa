@@ -27,6 +27,14 @@ from npa.orchestration.skypilot import controller as controller_module
 from npa.orchestration.skypilot import resources as resources_module
 
 
+SKYPILOT_CONFIG_WARNING = (
+    'The following keys (["allowed_clouds"]) have different values in the client '
+    "SkyPilot config with the server and will be ignored. Remove these keys to "
+    "disable this warning. If you want to specify it, please modify it on server "
+    "side or contact your administrator.\n"
+)
+
+
 def _fake_sky(tmp_path: Path) -> Path:
     sky = tmp_path / "sky"
     sky.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -790,6 +798,30 @@ def test_jobs_controller_inventory_discovers_exact_name_without_refresh(
 
     assert calls[0][0] == [str(sky_bin), "status", "--output", "json"]
     assert calls[0][1] is None
+    assert [item["name"] for item in clusters] == ["sky-jobs-controller-abc123"]
+    assert error == ""
+
+
+def test_jobs_controller_inventory_ignores_skypilot_config_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    sky_bin = _fake_sky(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        stdout = SKYPILOT_CONFIG_WARNING + json.dumps(
+            [{"name": "sky-jobs-controller-abc123", "status": "UP"}]
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    clusters, error = cleanup_module._jobs_controller_clusters(
+        isolated_config_dir=None,
+        config_path=None,
+        sky_bin=sky_bin,
+        refresh=False,
+    )
+
     assert [item["name"] for item in clusters] == ["sky-jobs-controller-abc123"]
     assert error == ""
 

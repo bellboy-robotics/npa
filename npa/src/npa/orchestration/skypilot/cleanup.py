@@ -30,6 +30,7 @@ from npa.orchestration.skypilot.controller import (
     ControllerBackend,
 )
 from npa.orchestration.skypilot.json_output import (
+    _without_config_mismatch_warning,
     is_verified_empty_queue_result,
     verified_structured_queue_rows,
 )
@@ -1365,7 +1366,7 @@ def _jobs_controller_clusters(
     if result.returncode != 0:
         return [], _format_command_error(cmd, result)
     try:
-        payload = json.loads(result.stdout or "[]")
+        payload = json.loads(_without_config_mismatch_warning(result.stdout) or "[]")
     except json.JSONDecodeError:
         return [], f"{' '.join(cmd)} returned non-json output"
     clusters = payload if isinstance(payload, list) else payload.get("clusters", [])

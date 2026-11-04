@@ -57,6 +57,14 @@ def _owned_api_process_boundary(monkeypatch):
     monkeypatch.setattr(local_api, "stop_isolated_api", lambda _scope: None)
 
 
+SKYPILOT_CONFIG_WARNING = (
+    'The following keys (["allowed_clouds"]) have different values in the client '
+    "SkyPilot config with the server and will be ignored. Remove these keys to "
+    "disable this warning. If you want to specify it, please modify it on server "
+    "side or contact your administrator.\n"
+)
+
+
 def _completed(
     stdout: str = "", returncode: int = 0
 ) -> subprocess.CompletedProcess[str]:
@@ -212,6 +220,18 @@ def test_sky_cleanup_requires_exact_structured_absence(monkeypatch) -> None:
     assert pauses == [10]
     assert all(command[-2:] == ["--output", "json"] for command, _kwargs in calls)
     assert all(kwargs["env"]["KUBECONFIG"] == "selected" for _command, kwargs in calls)
+
+
+def test_sky_cleanup_ignores_skypilot_config_warning(monkeypatch) -> None:
+    stdout = SKYPILOT_CONFIG_WARNING + '[{"name": "other", "status": "UP"}]'
+    monkeypatch.setattr(tf_mod, "_run_capture", lambda *_a, **_k: _completed(stdout))
+    monkeypatch.setattr(
+        tf_mod.time,
+        "sleep",
+        lambda *_args: pytest.fail("absent cluster must not be polled"),
+    )
+
+    tf_mod._wait_for_sky_down("/opt/npa/sky", "validation", {})
 
 
 def test_skypilot_smoke_scopes_check_and_uses_explicit_binary(

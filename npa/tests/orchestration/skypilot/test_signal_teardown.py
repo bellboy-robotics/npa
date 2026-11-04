@@ -19,6 +19,14 @@ from npa.orchestration.skypilot.signal_teardown import (
 )
 
 
+SKYPILOT_CONFIG_WARNING = (
+    'The following keys (["allowed_clouds"]) have different values in the client '
+    "SkyPilot config with the server and will be ignored. Remove these keys to "
+    "disable this warning. If you want to specify it, please modify it on server "
+    "side or contact your administrator.\n"
+)
+
+
 def _fake_sky(tmp_path: Path) -> Path:
     sky = tmp_path / "sky"
     sky.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -139,3 +147,11 @@ def test_signal_teardown_runs_sky_down_polls_until_absent_and_is_idempotent(
     assert all("--config" in cmd for cmd in calls)
     forbidden_teardown_flag = "-" + "-down"
     assert all(forbidden_teardown_flag not in part for cmd in calls for part in cmd)
+
+
+def test_matching_clusters_ignores_skypilot_config_warning() -> None:
+    output = SKYPILOT_CONFIG_WARNING + json.dumps([{"name": "run-a-worker"}])
+
+    assert signal_teardown_module._matching_clusters(output, ["run-a-*"]) == [
+        "run-a-worker"
+    ]
